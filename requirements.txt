@@ -1,0 +1,6 @@
+clickhouse-connect>=0.7
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+tldextract>=5.0   # registered domains, offline (bundled suffix list)
+tabulate>=0.9   # pandas.DataFrame.to_markdown, used by run_sql

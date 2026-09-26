@@ -1,0 +1,13 @@
+{
+  "_comment": "Committed example with documentation IPs. The real list (real host IPs) lives in data/expected_verdicts.json, which is gitignored and is used automatically when present.",
+  "cases": [
+    {"indicator": "bore.pub", "host": "192.0.2.10", "expected": "LIKELY_FALSE_POSITIVE",
+     "note": "bore client on control port 7835 only; no connections to a tunnel's public port."},
+    {"indicator": "203.0.113.80:443", "host": "198.51.100.23", "expected": "LIKELY_FALSE_POSITIVE",
+     "note": "ip:443 on a CDN; the host's SNIs on the IP are ordinary unrelated sites."},
+    {"indicator": "203.0.113.81:443", "host": "192.0.2.44", "expected": "SUSPICIOUS",
+     "note": "ip:443 on a CDN, but the host's SNI on the IP is a dynamic-DNS name."},
+    {"indicator": "203.0.113.82:443", "host": "192.0.2.45", "expected": "INSUFFICIENT_DATA",
+     "note": "no traffic live or in the feed's own evidence."}
+  ]
+}

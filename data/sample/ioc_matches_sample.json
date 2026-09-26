@@ -1,0 +1,308 @@
+[
+  {
+    "indicator_type": "domain",
+    "indicator": "bore.pub",
+    "affected_asset": "192.0.2.10",
+    "threatfox": {
+      "confidence": 100,
+      "first_seen_utc": "2026-09-15T10:00:00Z",
+      "last_seen_utc": "2026-09-15T10:00:00Z",
+      "malware": "win.nanocore",
+      "threat_type": "botnet_cc"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-15 10:00:00",
+          "client_ip": "192.0.2.10",
+          "server_ip": "159.223.110.159",
+          "server_port": 7835,
+          "ip_protocol": 4,
+          "transport_protocol": 6,
+          "sni": "",
+          "dns": "bore.pub",
+          "root_domain": "bore.pub",
+          "down_volume__bytes": 7920,
+          "up_volume__bytes": 7200,
+          "down_volume__packets": 120,
+          "up_volume__packets": 120,
+          "flow_count": 1,
+          "server_metadata__asn": "14061",
+          "server_metadata__asn_organization": "DigitalOcean, LLC",
+          "server_metadata__geo_country": "United States",
+          "server_metadata__geo_city": "North Bergen",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_ff13f40c84",
+    "created_at": "2026-09-17T01:00:00Z"
+  },
+  {
+    "indicator_type": "domain",
+    "indicator": "bore.pub",
+    "affected_asset": "192.0.2.10",
+    "threatfox": {
+      "confidence": 100,
+      "first_seen_utc": "2026-09-15T10:01:00Z",
+      "last_seen_utc": "2026-09-15T10:01:00Z",
+      "malware": "win.nanocore",
+      "threat_type": "botnet_cc"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-15 10:01:00",
+          "client_ip": "192.0.2.10",
+          "server_ip": "159.223.110.159",
+          "server_port": 7835,
+          "ip_protocol": 4,
+          "transport_protocol": 6,
+          "sni": "",
+          "dns": "bore.pub",
+          "root_domain": "bore.pub",
+          "down_volume__bytes": 7920,
+          "up_volume__bytes": 7200,
+          "down_volume__packets": 120,
+          "up_volume__packets": 120,
+          "flow_count": 1,
+          "server_metadata__asn": "14061",
+          "server_metadata__asn_organization": "DigitalOcean, LLC",
+          "server_metadata__geo_country": "United States",
+          "server_metadata__geo_city": "North Bergen",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_c083bec147",
+    "created_at": "2026-09-17T01:00:00Z"
+  },
+  {
+    "indicator_type": "domain",
+    "indicator": "bore.pub",
+    "affected_asset": "192.0.2.10",
+    "threatfox": {
+      "confidence": 100,
+      "first_seen_utc": "2026-09-16T23:59:00Z",
+      "last_seen_utc": "2026-09-16T23:59:00Z",
+      "malware": "win.nanocore",
+      "threat_type": "botnet_cc"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-16 23:59:00",
+          "client_ip": "192.0.2.10",
+          "server_ip": "159.223.110.159",
+          "server_port": 7835,
+          "ip_protocol": 4,
+          "transport_protocol": 6,
+          "sni": "",
+          "dns": "bore.pub",
+          "root_domain": "bore.pub",
+          "down_volume__bytes": 7920,
+          "up_volume__bytes": 7200,
+          "down_volume__packets": 120,
+          "up_volume__packets": 120,
+          "flow_count": 1,
+          "server_metadata__asn": "14061",
+          "server_metadata__asn_organization": "DigitalOcean, LLC",
+          "server_metadata__geo_country": "United States",
+          "server_metadata__geo_city": "North Bergen",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_cd79db2afe",
+    "created_at": "2026-09-17T01:00:00Z"
+  },
+  {
+    "indicator_type": "ip:port",
+    "indicator": "203.0.113.80:443",
+    "affected_asset": "198.51.100.23",
+    "threatfox": {
+      "confidence": 75,
+      "first_seen_utc": "2026-09-14T08:12:00Z",
+      "last_seen_utc": "2026-09-14T08:12:00Z",
+      "malware": "win.nanocore",
+      "threat_type": "botnet_cc"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-14 08:12:00",
+          "client_ip": "198.51.100.23",
+          "server_ip": "203.0.113.80",
+          "server_port": 443,
+          "ip_protocol": 4,
+          "transport_protocol": 17,
+          "sni": "cloudflare-ech.com",
+          "dns": "",
+          "root_domain": "cloudflare-ech.com",
+          "down_volume__bytes": 48213,
+          "up_volume__bytes": 9120,
+          "down_volume__packets": 52,
+          "up_volume__packets": 31,
+          "flow_count": 1,
+          "server_metadata__asn": "13335",
+          "server_metadata__asn_organization": "Cloudflare, Inc.",
+          "server_metadata__geo_country": "Australia",
+          "server_metadata__geo_city": "Sydney",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [
+        {
+          "start": "2026-09-14 08:12:00.104512",
+          "finish": "2026-09-14 08:12:41.332010",
+          "duration_sec": 41.2,
+          "flow_id": "00000000-0000-4000-8000-000000000001",
+          "client_ip": "198.51.100.23",
+          "server_ip": "203.0.113.80",
+          "client_port": 60412,
+          "server_port": 443,
+          "protocol": 17,
+          "down_bytes": 1250000,
+          "up_bytes": 61000,
+          "down_packets": 1010,
+          "up_packets": 240,
+          "classifier": "TPED.SNI.PGTLD.P",
+          "type": "_unknown"
+        }
+      ],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_35c90e1791",
+    "created_at": "2026-09-15T01:00:00Z"
+  },
+  {
+    "indicator_type": "ip:port",
+    "indicator": "203.0.113.80:443",
+    "affected_asset": "198.51.100.23",
+    "threatfox": {
+      "confidence": 75,
+      "first_seen_utc": "2026-09-14T08:13:00Z",
+      "last_seen_utc": "2026-09-14T08:13:00Z",
+      "malware": "win.nanocore",
+      "threat_type": "botnet_cc"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-14 08:13:00",
+          "client_ip": "198.51.100.23",
+          "server_ip": "203.0.113.80",
+          "server_port": 443,
+          "ip_protocol": 4,
+          "transport_protocol": 17,
+          "sni": "cloudflare-ech.com",
+          "dns": "",
+          "root_domain": "cloudflare-ech.com",
+          "down_volume__bytes": 48213,
+          "up_volume__bytes": 9120,
+          "down_volume__packets": 52,
+          "up_volume__packets": 31,
+          "flow_count": 1,
+          "server_metadata__asn": "13335",
+          "server_metadata__asn_organization": "Cloudflare, Inc.",
+          "server_metadata__geo_country": "Australia",
+          "server_metadata__geo_city": "Sydney",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [
+        {
+          "start": "2026-09-14 08:13:00.104512",
+          "finish": "2026-09-14 08:13:41.332010",
+          "duration_sec": 41.2,
+          "flow_id": "00000000-0000-4000-8000-000000000001",
+          "client_ip": "198.51.100.23",
+          "server_ip": "203.0.113.80",
+          "client_port": 60412,
+          "server_port": 443,
+          "protocol": 17,
+          "down_bytes": 1250000,
+          "up_bytes": 61000,
+          "down_packets": 1010,
+          "up_packets": 240,
+          "classifier": "TPED.SNI.PGTLD.P",
+          "type": "_unknown"
+        }
+      ],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_f9781ad98c",
+    "created_at": "2026-09-15T01:00:00Z"
+  },
+  {
+    "indicator_type": "domain",
+    "indicator": "update-check.example",
+    "affected_asset": "192.0.2.44",
+    "threatfox": {
+      "confidence": 100,
+      "first_seen_utc": "2026-09-13T21:40:00Z",
+      "last_seen_utc": "2026-09-13T21:40:00Z",
+      "malware": "js.clearfake",
+      "threat_type": "payload_delivery"
+    },
+    "evidence": {
+      "subscriber_activity": [
+        {
+          "time": "2026-09-13 21:40:00",
+          "client_ip": "192.0.2.44",
+          "server_ip": "203.0.113.99",
+          "server_port": 443,
+          "ip_protocol": 4,
+          "transport_protocol": 6,
+          "sni": "update-check.example",
+          "dns": "update-check.example",
+          "root_domain": "update-check.example",
+          "down_volume__bytes": 5320,
+          "up_volume__bytes": 1810,
+          "down_volume__packets": 11,
+          "up_volume__packets": 9,
+          "flow_count": 1,
+          "server_metadata__asn": "64500",
+          "server_metadata__asn_organization": "Example Hosting Ltd",
+          "server_metadata__geo_country": "Netherlands",
+          "server_metadata__geo_city": "Amsterdam",
+          "subscriber_metadata__operator": null,
+          "subscriber_metadata__country": null,
+          "subscriber_metadata__device": null,
+          "network_metadata__country": null,
+          "network_metadata__operator": null
+        }
+      ],
+      "long_flow_summary": [],
+      "dns_tuple": []
+    },
+    "match_id": "m_sample_a58853ed62",
+    "created_at": "2026-09-14T01:00:00Z"
+  }
+]

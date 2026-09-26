@@ -1,0 +1,9 @@
+{
+  "bore.pub": {
+    "threatfox_ioc_id": 0,
+    "threatfox_first_seen": "YYYY-MM-DD",
+    "threatfox_last_seen": "YYYY-MM-DD",
+    "reporter": "name from the ThreatFox entry",
+    "is_compromised": false
+  }
+}
