@@ -1,5 +1,9 @@
 """Pure analysis of flow data: no database, no LLM.
 
+long_flow_summary only stores flows over 1 MB, so the flow analysis here is
+about large sessions (held open, upload-heavy, bulk). Contact cadence and
+beacons are analysed on per-minute data in beacon.py.
+
 db.py fetches pandas DataFrames, tools.py passes them here, and the results
 go into the case file. Keeping these functions free of I/O lets the tests run
 them on fake data.
@@ -26,18 +30,15 @@ import pandas as pd
 from . import config, knowledge
 
 HELD_OPEN_MIN_SEC = 3600        # a flow lasting an hour or more is "held open"
-CHECKIN_MAX_SEC = 300           # a check-in is brief: median flow under 5 minutes
-MIN_CHECKINS = 5                # need this many short flows to judge an interval
-REGULARITY_THRESHOLD = 70.0     # regularity score at or above this = regular interval
 QUICK_RECONNECT_SEC = 60        # a gap this short between held-open flows is a reconnect
 STEADY_RATE_CV = 0.25           # packet-rate spread across held-open flows below this = steady
 UPLOAD_HEAVY_RATIO = 2.0        # up bytes at least twice down bytes
 UPLOAD_HEAVY_MIN_BYTES = 100_000
 ACTIVE_PERIOD_GAP_SEC = 3600    # flows less than an hour apart belong to one active period
 MAX_LISTED_FLOWS = 5
-MAX_LISTED_HELD_OPEN = 15
-MAX_LISTED_DESTINATIONS = 15
-MAX_LISTED_DOMAIN_NAMES = 40
+MAX_LISTED_HELD_OPEN = 6
+MAX_LISTED_DESTINATIONS = 10
+MAX_LISTED_DOMAIN_NAMES = 20
 
 
 # --- formatting ---------------------------------------------------------------
@@ -221,64 +222,32 @@ def _held_open_summary(held: pd.DataFrame) -> dict:
     }
 
 
-def _checkin_summary(short: pd.DataFrame) -> dict | None:
-    """Interval regularity of the short flows. None if there are too few to judge."""
-    if len(short) < MIN_CHECKINS:
-        return None
-    starts = np.array(sorted(pd.Timestamp(t).timestamp() for t in short["start"]))
-    gaps = np.diff(starts)
-    regularity = _regularity_score(gaps)
-    median_duration = float(short["duration_sec"].median())
-    total_bytes = (short["up_bytes"] + short["down_bytes"]).astype(float)
-    size_consistency = round(100.0 * (1.0 - min(_spread(total_bytes), 1.0)), 1)
-    regular = regularity >= REGULARITY_THRESHOLD and median_duration <= CHECKIN_MAX_SEC
-    return {
-        "count": int(len(short)),
-        "median_interval_sec": round(float(np.median(gaps)), 1),
-        "regularity_score": regularity,
-        "median_duration_sec": round(median_duration, 1),
-        "size_consistency_score": size_consistency,
-        "regular_checkins": bool(regular),
-    }
-
-
-def _pattern(n_held: int, n_short: int, checkins_regular: bool) -> tuple[str, str]:
-    if n_held and checkins_regular:
-        return ("held_open_plus_checkins",
-                "Held-open connection plus short check-ins at a regular interval (beacon-like).")
-    if n_held and n_short:
+def _pattern(n_held: int, n_other: int) -> tuple[str, str]:
+    if n_held and n_other:
         return ("held_open_plus_sessions",
-                f"Held-open connection ({n_held} long-lived flow(s)) plus {n_short} separate shorter "
-                "session(s) with no regular interval. Not a beacon pattern.")
+                f"Held-open connection ({n_held} long-lived flow(s) over 1 MB) plus {n_other} shorter large "
+                "session(s).")
     if n_held:
-        return ("held_open",
-                f"Held-open connection ({n_held} long-lived flow(s)). Not repeated check-ins, so not a beacon pattern.")
-    if checkins_regular:
-        return ("repeated_checkins",
-                "Repeated short check-ins at a regular interval: the classic beacon pattern.")
-    return ("sessions",
-            f"{n_short} separate session(s) with no regular interval (or too few to judge). "
-            "Not a beacon pattern on this evidence.")
+        return ("held_open", f"Held-open connection ({n_held} long-lived flow(s) over 1 MB).")
+    return ("sessions", f"{n_other} large session(s) over 1 MB.")
 
 
 def classify_flows(flows: pd.DataFrame) -> dict:
-    """Tell a held-open connection (few long flows, steady packet rate) apart
-    from repeated short check-ins (many brief flows at a regular interval).
-    Only the second is a beacon. Daily presence alone is never scored."""
+    """Describe the LARGE flows only: held-open connections and other
+    sessions over 1 MB. long_flow_summary does not store flows under 1 MB,
+    so it cannot show check-ins or beacons, and no cadence is scored here:
+    that is beacon.py's job, on per-minute data."""
     if flows.empty:
-        return {"pattern": "no_flows", "description": "No flows in long_flow_summary.", "beacon_like": False}
+        return {"pattern": "no_flows", "description": "No flows over 1 MB in long_flow_summary."}
     durations = flows["duration_sec"].astype(float)
     held = flows[durations >= HELD_OPEN_MIN_SEC]
-    short = flows[durations < HELD_OPEN_MIN_SEC]
-    checkins = _checkin_summary(short)
-    checkins_regular = bool(checkins and checkins["regular_checkins"])
-    pattern, description = _pattern(len(held), len(short), checkins_regular)
+    other = flows[durations < HELD_OPEN_MIN_SEC]
+    pattern, description = _pattern(len(held), len(other))
     return {
         "pattern": pattern,
         "description": description,
-        "beacon_like": checkins_regular,
         "held_open": _held_open_summary(held) if not held.empty else None,
-        "short_flows": {"count": int(len(short)), "checkin_analysis": checkins},
+        "other_flows": {"count": int(len(other))},
     }
 
 
@@ -356,6 +325,27 @@ def activity_hints(root_domains) -> dict[str, list[str]]:
             if any(domain == m or domain.endswith("." + m) for m in markers):
                 hints.setdefault(label, []).append(domain)
     return dict(sorted(hints.items(), key=lambda kv: -len(kv[1])))
+
+
+# User-agent markers per platform, most specific first (an iPhone agent
+# also says "like Mac OS X", Android agents also say "Linux").
+USER_AGENT_PLATFORMS = (
+    ("ios", ("iphone", "ipad", "ios/")),
+    ("android", ("android", "okhttp", "dalvik")),
+    ("windows", ("windows", "win64", "microsoft-delivery-optimization", "microsoft bits", "microsoft-cryptoapi",
+                 "msie", "officeclicktorun", "winhttp")),
+    ("macos", ("macintosh", "mac os x", "darwin")),
+    ("linux", ("linux", "ubuntu", "debian", "fedora", "apt-http", "x11")),
+)
+
+
+def platform_from_user_agent(agent: str | None) -> str | None:
+    """'windows', 'macos', 'linux', 'android', 'ios' or None for an HTTP user agent."""
+    text = (agent or "").lower()
+    for platform, markers in USER_AGENT_PLATFORMS:
+        if any(m in text for m in markers):
+            return platform
+    return None
 
 
 def platform_hints(root_domains) -> dict[str, list[str]]:

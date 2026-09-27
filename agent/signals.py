@@ -23,10 +23,10 @@ AGAINST = "against_threat"
 NEUTRAL = "neutral"
 
 WEB_PORTS = {80, 443}
+PLATFORM_MIN_SHARE = 0.25        # the target OS must be the main platform, or at least this share of agents
 DOWNLOAD_MIN_BYTES = 500_000     # payload_delivery: a download of at least this size ...
 DOWNLOAD_MIN_RATIO = 5.0         # ... and this many times more down than up
 TINY_TRANSFER_BYTES = 50_000     # payload_delivery: less than this in total is a page load, not a payload
-ONE_OFF_MAX_MINUTES = 10         # this few active minutes on one day is a one-off contact
 
 VERDICTS = ("LIKELY_THREAT", "SUSPICIOUS", "LIKELY_FALSE_POSITIVE", "INSUFFICIENT_DATA")
 
@@ -90,7 +90,7 @@ def shared_infrastructure(ev: dict) -> dict:
     if peer_hosts >= config.SHARED_PEER_HOSTS:
         against.append(f"{peer_hosts} campus hosts contacted it (long_flow_summary)")
     domains = 0
-    for pdns in ev.get("passive_dns", []):
+    for pdns in ev.get("names_on_ip", []):
         if "error" in pdns:
             continue
         domains = max(domains, pdns["distinct_root_domains"])
@@ -105,13 +105,13 @@ def shared_infrastructure(ev: dict) -> dict:
         return _signal("shared_infrastructure", "yes", AGAINST,
                        "Shared by many unrelated users: " + "; ".join(against) + ".")
 
-    known_pdns = [p for p in ev.get("passive_dns", []) if "error" not in p and p["distinct_root_domains"]]
+    known_pdns = [p for p in ev.get("names_on_ip", []) if "error" not in p and p["distinct_root_domains"]]
     hosting = any((i.get("shared_asn") or {}).get("kind") == "hosting" for i in ev.get("asn", []))
     if known_pdns and domains <= 1 and not hosting:
         return _signal("shared_infrastructure", "no", SUPPORTS,
                        "Only one domain seen on this IP and it is not a known shared ASN: looks dedicated.", "weak")
     return _signal("shared_infrastructure", "unknown", NEUTRAL,
-                   "Not enough to say whether the IP is shared (hosting ASN or no passive DNS).")
+                   "Not enough to say whether the IP is shared (hosting ASN or no names on the IP).")
 
 
 def _bad_name_reasons(ev: dict) -> tuple[list[str], list[str]]:
@@ -198,23 +198,21 @@ def protocol_fit(ev: dict) -> dict:
 
 
 def traffic_shape_fit(ev: dict) -> dict:
+    """Volume shape against the threat type. Cadence (check-ins) is not
+    judged here: that is contact_pattern, on per-minute data."""
     flows = ev.get("flows", {})
     threat_type = (ev["identity"].get("threat_type") or "").lower()
-    classification = flows.get("classification", {})
     up, down = _total_bytes(flows)
-    minutes = flows.get("activity", {}).get("active_minutes", 0)
+    exfil = flows.get("upload_heavy_over_exfil_threshold") or {}
     if threat_type in ("botnet_cc", "c2"):
-        if classification.get("beacon_like"):
-            return _signal("traffic_shape_fit", classification["pattern"], SUPPORTS,
-                           "Repeated short check-ins at a regular interval: the botnet_cc shape.", "strong")
         if _service_fits(ev.get("expected", {})):
-            return _signal("traffic_shape_fit", classification.get("pattern", "?"), NEUTRAL,
+            return _signal("traffic_shape_fit", "service client", NEUTRAL,
                            "Shape is the known service's normal client traffic.")
-        if flows.get("long_flow_count", 0) <= 3 and minutes <= ONE_OFF_MAX_MINUTES:
-            return _signal("traffic_shape_fit", f"{flows.get('long_flow_count', 0)} long flow(s), {minutes} active min",
-                           AGAINST, "A few short sessions, not repeated check-ins or a persistent C2 connection.")
-        return _signal("traffic_shape_fit", classification.get("pattern", "?"), NEUTRAL,
-                       "Shape neither matches nor rules out the botnet_cc profile.")
+        if exfil.get("count"):
+            return _signal("traffic_shape_fit", f"{exfil['count']} upload-heavy flow(s)", SUPPORTS,
+                           "Large upload-heavy transfers: data leaving the host, as stolen data would.", "weak")
+        return _signal("traffic_shape_fit", f"up {up} B / down {down} B", NEUTRAL,
+                       "Volume neither matches nor rules out the botnet_cc profile.")
     if threat_type == "payload_delivery":
         if down >= DOWNLOAD_MIN_BYTES and down >= DOWNLOAD_MIN_RATIO * max(up, 1):
             return _signal("traffic_shape_fit", f"down {down} B / up {up} B", SUPPORTS,
@@ -222,32 +220,122 @@ def traffic_shape_fit(ev: dict) -> dict:
         if up + down < TINY_TRANSFER_BYTES:
             return _signal("traffic_shape_fit", f"{up + down} B total", AGAINST,
                            "A tiny transfer, typical of a page or asset load, not a payload.")
-    return _signal("traffic_shape_fit", classification.get("pattern", "?"), NEUTRAL, "No clear fit either way.")
+    return _signal("traffic_shape_fit", f"up {up} B / down {down} B", NEUTRAL, "No clear fit either way.")
 
 
-def recurrence(ev: dict) -> dict:
-    flows = ev.get("flows", {})
-    classification = flows.get("classification", {})
-    days = _active_days(flows)
-    if classification.get("beacon_like") and len(days) >= 2:
-        return _signal("recurrence", f"{len(days)} day(s), regular", SUPPORTS,
-                       "Regular periodic contact across several days.", "weak")
-    if classification.get("held_open"):
-        return _signal("recurrence", f"{len(days)} day(s), held open", NEUTRAL,
-                       "A held-open connection: presence across days is not a beacon.")
-    if len(days) <= 1:
-        return _signal("recurrence", f"{len(days)} day(s)", AGAINST, "A one-off contact on a single day.")
-    return _signal("recurrence", f"{len(days)} day(s), irregular", AGAINST,
-                   "Irregular contact on several days, like human use rather than a timer.")
+def contact_explanation(ev: dict) -> tuple[str | None, bool]:
+    """(why a periodic or held-open pattern is normal, whether that reason is
+    about the traffic itself). Task 3, 1.2: a beacon-like pattern only counts
+    as a threat when nothing here explains it."""
+    expected = ev.get("expected", {})
+    if _service_fits(expected):
+        return f"the {expected['service']['profile']['name'].split(' (')[0]} client's normal traffic", True
+    app = ev.get("app_context") or {}
+    if app.get("explained_by"):
+        return app["explained_by"], True
+    if app.get("remote_access_app"):
+        return f"a remote-access app ({app['remote_access_app']})", True
+    ip_info = next((p for p in ev.get("names_on_ip", []) if "error" not in p), None)
+    other_hosts = max((ip_info or {}).get("campus_hosts") or 0, 1) - 1
+    popular_domain = max((f.get("other_campus_hosts") or 0 for f in ev.get("domain_features", [])), default=0)
+    if max(other_hosts, popular_domain) >= config.POPULAR_DESTINATION_MIN_HOSTS:
+        return f"a popular destination ({max(other_hosts, popular_domain)} other campus hosts use it)", False
+    return None, False
+
+
+def _contact_value(contact: dict) -> str:
+    f = contact.get("features", {})
+    parts = [contact.get("pattern", "?")]
+    if f.get("bursts"):
+        parts.append(f"{f['bursts']} burst(s)")
+    if f.get("median_gap_min"):
+        parts.append(f"every ~{f['median_gap_min']:.0f} min")
+    if f.get("night_share") is not None:
+        parts.append(f"night share {f['night_share']:.0%}")
+    return ", ".join(parts)
+
+
+def contact_pattern(ev: dict) -> dict:
+    """The contact pattern from per-minute data (beacon.py), explained before
+    it is called suspicious."""
+    contact = ev.get("contact") or {}
+    pattern = contact.get("pattern", "insufficient_data")
+    value = _contact_value(contact)
+    if pattern in ("periodic_checkin", "held_open"):
+        reason, about_traffic = contact_explanation(ev)
+        kind = "regular small check-ins, day and night" if pattern == "periodic_checkin" else "a held-open connection"
+        if reason:
+            direction = AGAINST if about_traffic else NEUTRAL
+            result = _signal("contact_pattern", value, direction, f"{kind.capitalize()}, explained by {reason}.")
+            result["explained_by"] = reason
+            return result
+        strength = "strong" if pattern == "periodic_checkin" else "weak"
+        return _signal("contact_pattern", value, SUPPORTS,
+                       f"{kind.capitalize()} to an unrecognised, little-used destination.", strength)
+    if pattern in ("one_off", "human_interactive"):
+        why = "One or two short contacts." if pattern == "one_off" else "Bursty use in waking hours, like a person."
+        return _signal("contact_pattern", value, AGAINST, why)
+    if pattern == "insufficient_data":
+        return _signal("contact_pattern", value, NEUTRAL, "No per-minute contact data for the window.")
+    return _signal("contact_pattern", value, NEUTRAL, contact.get("description", "No clear pattern."))
+
+
+def app_explained(ev: dict) -> dict:
+    """SuperNetFlow's own app labels and recognised sessions for this traffic."""
+    app = ev.get("app_context") or {}
+    if app.get("explained_by"):
+        return _signal("app_explained", app["explained_by"], AGAINST,
+                       f"The traffic is recognised: {app['explained_by']}.")
+    if app.get("remote_access_app"):
+        return _signal("app_explained", app["remote_access_app"], NEUTRAL,
+                       "A remote-access app: it explains the traffic but is an exposure in itself.")
+    campus = [a for a in app.get("campus_apps", []) if a["application"] not in ("_unknown", "Web Browsing")]
+    if campus:
+        return _signal("app_explained", f"campus: {campus[0]['application']}", NEUTRAL,
+                       f"Campus-wide this IP carries {campus[0]['application']}, but this host's traffic is unlabelled.")
+    return _signal("app_explained", "no label", NEUTRAL, "SuperNetFlow has no app label or session for this traffic.")
+
+
+def dns_anomaly(ev: dict) -> dict:
+    """Unusual external resolvers or a high unanswered share (dns_tuple). There
+    are no NXDOMAIN counts here, so a DGA cannot be seen directly."""
+    dns = ev.get("dns") or {}
+    if not dns.get("present"):
+        return _signal("dns_anomaly", "not seen", NEUTRAL, dns.get("note", "No DNS data for this host."))
+    reasons = []
+    if dns.get("rare_resolvers"):
+        reasons.append(f"asks DNS server(s) few campus hosts use ({', '.join(dns['rare_resolvers'][:3])})")
+    if dns.get("unanswered_high"):
+        reasons.append(f"{dns['unanswered_ratio']:.0%} of its DNS queries go unanswered "
+                       f"(campus median {dns['campus_median_unanswered_ratio']:.0%})")
+    if reasons:
+        return _signal("dns_anomaly", "; ".join(reasons), SUPPORTS, "The host " + " and ".join(reasons) + ".", "weak")
+    return _signal("dns_anomaly", "normal", NEUTRAL, "Only common resolvers and a normal unanswered share.")
 
 
 def platform_fit(ev: dict) -> dict:
+    """The malware's target OS against the host's platform: user agents first
+    (host_applications), then OS-specific domains."""
     target = ev.get("expected", {}).get("malware_profile", {}).get("platform")
+    agents = (ev.get("host_apps") or {}).get("user_agent_platforms") or {}
     hints = ev.get("other_traffic", {}).get("platform_hints") or {}
     if not target:
         return _signal("platform_fit", "n/a", NEUTRAL, "No target platform on file for this family.")
+    if agents:
+        seen = ", ".join(agents)
+        total = sum(agents.values())
+        share = agents.get(target, 0) / max(total, 1)
+        dominant = max(agents, key=agents.get)
+        if dominant == target or share >= PLATFORM_MIN_SHARE:
+            return _signal("platform_fit", f"user agents: {seen}", SUPPORTS,
+                           f"The host's user agents are mostly {target}, which the family targets.", "weak")
+        if target not in agents:
+            return _signal("platform_fit", f"user agents: {seen}", AGAINST,
+                           f"The host's user agents show only {seen}; the family targets {target}.")
+        return _signal("platform_fit", f"user agents: {seen}", NEUTRAL,
+                       f"Mixed platforms ({seen}), mostly {dominant}: several devices may share this address.")
     if not hints:
-        return _signal("platform_fit", "no hints", NEUTRAL, "No operating-system hints in the host's other traffic.")
+        return _signal("platform_fit", "no hints", NEUTRAL, "No user agents or operating-system domains for the host.")
     seen = ", ".join(f"{k}: {', '.join(v[:2])}" for k, v in hints.items())
     if target in hints:
         return _signal("platform_fit", seen, SUPPORTS,
@@ -298,7 +386,7 @@ def known_service(ev: dict) -> dict:
 
 
 SIGNAL_FUNCTIONS = (shared_infrastructure, sni_matches_indicator, protocol_fit, traffic_shape_fit,
-                    recurrence, platform_fit, campus_spread, known_service)
+                    contact_pattern, app_explained, dns_anomaly, platform_fit, campus_spread, known_service)
 SIGNAL_NAMES = tuple(f.__name__ for f in SIGNAL_FUNCTIONS)
 
 
@@ -318,8 +406,9 @@ def baseline_verdict(signals: list[dict], evidence_found: bool) -> dict:
     1. No traffic (live or feed)                          -> INSUFFICIENT_DATA
     2. 2+ strong threat signals, or 1 strong + 2 weak     -> LIKELY_THREAT
     3. 1 strong threat signal                             -> SUSPICIOUS
-    4. Shared infrastructure or a known service's normal
-       client, at most 2 weak threat signals              -> LIKELY_FALSE_POSITIVE
+    4. Shared infrastructure, a known service's normal client,
+       or an app SuperNetFlow recognises (app_explained),
+       at most 2 weak threat signals                      -> LIKELY_FALSE_POSITIVE
        (a rare small site plus a Windows host is normal
        browsing on a CDN, not a reason to escalate)
     5. 2+ weak threat signals                             -> SUSPICIOUS
@@ -329,7 +418,7 @@ def baseline_verdict(signals: list[dict], evidence_found: bool) -> dict:
     strong = [s["name"] for s in signals if s["direction"] == SUPPORTS and s["strength"] == "strong"]
     weak = [s["name"] for s in signals if s["direction"] == SUPPORTS and s["strength"] == "weak"]
     against = [s["name"] for s in signals if s["direction"] == AGAINST]
-    benign_anchor = [n for n in against if n in ("shared_infrastructure", "known_service")]
+    benign_anchor = [n for n in against if n in ("shared_infrastructure", "known_service", "app_explained")]
 
     if not evidence_found:
         return _verdict("INSUFFICIENT_DATA", "high", 1, "No traffic to the flagged IP, live or in the feed.")

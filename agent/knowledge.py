@@ -11,6 +11,10 @@ checked against the service's source code or documentation.
 """
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
+
 THREAT_TYPE_PROFILES: dict[str, dict] = {
     "payload_delivery": {
         "ioc_role": "payload delivery site",
@@ -435,3 +439,48 @@ def classify_asn(asn_org: str | None) -> str | None:
     if any(k in org for k in CLOUD_VPS_ASN_KEYWORDS):
         return "cloud_vps"
     return None
+
+
+# Well-known public DNS resolvers. A host asking these directly is common
+# (browsers with DNS-over-HTTPS off, phones, consoles); an unknown resolver
+# few other hosts use is the unusual case.
+PUBLIC_RESOLVERS: dict[str, str] = {
+    "8.8.8.8": "Google", "8.8.4.4": "Google", "1.1.1.1": "Cloudflare", "1.0.0.1": "Cloudflare",
+    "9.9.9.9": "Quad9", "149.112.112.112": "Quad9", "208.67.222.222": "OpenDNS", "208.67.220.220": "OpenDNS",
+    "94.140.14.14": "AdGuard", "94.140.15.15": "AdGuard", "223.5.5.5": "AliDNS", "223.6.6.6": "AliDNS",
+    "114.114.114.114": "114DNS", "119.29.29.29": "DNSPod", "76.76.2.0": "Control D",
+}
+
+
+# --- SuperNetFlow application labels (task 3) -------------------------------------
+
+APPLICATIONS_PATH = Path(__file__).resolve().parent / "data" / "applications.json"
+
+
+@lru_cache(maxsize=1)
+def _applications() -> dict:
+    return json.loads(APPLICATIONS_PATH.read_text(encoding="utf-8"))
+
+
+def app_class(application: str | None, category: str | None, org_label: str = "") -> str:
+    """How far an app label explains traffic:
+      'benign'         a normal kind of app (video, updates, conferencing, ...)
+      'vendor'         a named vendor or app in a generic category (e.g. Dell under Download)
+      'remote_access'  remote desktop or remote access: explains the traffic but is an exposure
+      'privacy_vpn'    a VPN or privacy relay (e.g. Apple Private Relay): hides where
+                       the host goes, but does not open the host to outside access
+      'infrastructure' a cloud, CDN or ad network label, or the site's own name: explains nothing
+      'unknown'        no label"""
+    data = _applications()
+    app = (application or "").strip()
+    infra = {a.lower() for a in data["infrastructure_apps"]}
+    if org_label:
+        infra.add(org_label.lower())
+    kind = data["categories"].get((category or "").strip(), "unknown")
+    if kind in ("remote_access", "privacy_vpn"):
+        return kind
+    if not app or app.lower() in infra:
+        return "unknown" if kind == "unknown" else "infrastructure"
+    if kind == "benign":
+        return "benign"
+    return "vendor"

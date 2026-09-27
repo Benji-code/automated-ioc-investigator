@@ -22,10 +22,10 @@ follow-up tools (below).
 | 2 | Read the IOC context: type, malware, threat type, confidence | Auto | `evidence.case_identity` |
 | 3 | Identify every flagged IP, its ASN and whether it is shared infrastructure | Auto | `tools.identify_server_ips`, `tools.ip_asn` |
 | 4 | Set expected behaviour: threat type, malware family, known services; domain features | Auto | `tools.expected_behaviour`, `tools.domain_features`, `knowledge.py` |
-| 5 | Analyse flows between host and flagged IP, and the names (SNI/DNS) the host used on it | Auto | `tools.indicator_flows`, `tools.indicator_names`, `analysis.py` |
+| 5 | Analyse flows between host and flagged IP, the names (SNI/DNS) the host used on it, the per-minute contact pattern, and app labels | Auto | `tools.indicator_flows`, `tools.indicator_names`, `tools.beacon_analysis`, `tools.app_context_for_indicator`, `beacon.py` |
 | 6 | Compare with expected compromised behaviour | Agent | prompt in `assess.py` |
-| 7 | Compare with the host's traffic to other IPs, incl. platform hints | Auto + agent | `tools.host_other_traffic` |
-| 8 | Other internal hosts on the flagged IP, and every name on it campus-wide | Auto | `tools.indicator_peers`, `tools.ip_passive_dns` |
+| 7 | Compare with the host's traffic to other IPs: apps, user-agent platform, DNS behaviour, load and uptime | Auto + agent | `tools.host_other_traffic`, `tools.host_applications`, `tools.host_dns_behaviour`, `tools.host_load_baseline` |
+| 8 | Other internal hosts on the flagged IP, and every name on it campus-wide (one day per query) | Auto | `tools.indicator_peers`, `tools.names_on_ip` |
 | 9 | Signals, behaviour category and baseline verdict (code), then the model's verdict, checked by code | Auto + agent | `signals.py`, `behaviour.py`, `assess.py` |
 | 10 | Write the three-paragraph report | Auto | `narrative.py`, `report.py` |
 
@@ -55,7 +55,7 @@ instead, labelled "from the IOC feed, not re-queried".
 
 ### Signals and the baseline verdict
 
-Before the model runs, `agent/signals.py` computes eight signals, each
+Before the model runs, `agent/signals.py` computes ten signals, each
 `supports_threat` (strong or weak), `against_threat` or `neutral`, with a
 one-line reason:
 
@@ -65,8 +65,10 @@ one-line reason:
 | `sni_matches_indicator` | The names the host used on the IP are ordinary sites | Domain indicator named in the traffic; or a name that is itself flagged, dynamic DNS, or rare and DGA-like (strong); rare, new, DGA-like or free hosting alone (weak) |
 | `protocol_fit` | QUIC (UDP/443) or TLS web browsing, for a custom-TCP family | TCP to a non-web port, for a custom-TCP family (weak) |
 | `traffic_shape_fit` | A few short sessions (botnet_cc); a tiny transfer (payload_delivery) | Regular check-ins (strong); a payload-sized download (weak) |
-| `recurrence` | A one-off, or irregular human-like use | Regular contact across several days (weak) |
-| `platform_fit` | Only other-OS signs (e.g. Apple for a `win.` family) | Signs of the targeted OS (weak) |
+| `contact_pattern` | One-off or human-like use (per-minute data); or a periodic/held-open pattern explained by a recognised app, session, known service or popular destination | Unexplained regular small check-ins day and night (strong) or an unexplained held-open connection (weak) |
+| `app_explained` | SuperNetFlow labels the traffic as a known app, or it was part of a recognised app session | (never) |
+| `dns_anomaly` | (never) | The host asks DNS servers few campus hosts use, or many of its queries go unanswered (weak) |
+| `platform_fit` | Only other-OS signs, from user agents first, then OS domains | The host's user agents are mostly the targeted OS (weak) |
 | `campus_spread` | Many campus hosts, none independently flagged | Peers flagged by *other* indicators for the same family (strong) |
 | `known_service` | Only the service's own client ports | Other ports on the service (e.g. a tunnel's public port) (strong) |
 
@@ -77,7 +79,7 @@ The baseline verdict follows fixed rules (`signals.baseline_verdict`):
 1. No traffic, live or in the feed: **INSUFFICIENT_DATA** (set in code, whatever the model says)
 2. 2+ strong threat signals, or 1 strong + 2 weak: **LIKELY_THREAT**
 3. 1 strong threat signal: **SUSPICIOUS**
-4. Shared infrastructure or a known service's normal client, at most 2 weak threat signals: **LIKELY_FALSE_POSITIVE**
+4. Shared infrastructure, a known service's normal client or a recognised app, at most 2 weak threat signals: **LIKELY_FALSE_POSITIVE**
 5. 2+ weak threat signals: **SUSPICIOUS**
 6. Only signals against threat: **LIKELY_FALSE_POSITIVE** (low confidence)
 7. Nothing either way: **SUSPICIOUS** (low confidence)
@@ -99,7 +101,7 @@ All are bound to the case's host in code.
 | `timeline_around(time, minutes)` | Everything the host did around one time: a browsing burst or a lone connection? |
 | `host_baseline(days)` | The host's normal daily volume, destinations and active hours |
 | `compare_sessions(date_a, date_b)` | The host's traffic with the flagged IP on two dates |
-| `run_sql(sql)` | Anything else: SELECT only, allowed tables, must filter on the host and a time column, 50-row cap |
+| `run_sql(sql)` | Anything else: SELECT only, the tables in `docs/schema.md`, must filter on the host or a flagged server IP and a time column within the table's span (5 days per-minute, 30 days 5-minute, 90 days hourly), 50-row cap |
 
 Up to `MAX_TOOL_ROUNDS` (default 4) rounds per case. Every call is logged in the report.
 
@@ -114,6 +116,9 @@ agent/
   analysis.py        flow analysis on DataFrames (no I/O, so it is testable offline)
   tools.py           one function per workflow question, plus the model's follow-up tools
   signals.py         evidence signals and the baseline verdict rules
+  beacon.py          per-minute contact pattern (periodic, held open, human, ...)
+  schema.py          verified table descriptions: the model's schema card and docs/schema.md
+  data/applications.json  SuperNetFlow app categories: benign, neutral, remote access
   behaviour.py       behaviour category (tunnelling, beaconing, web on shared infrastructure, ...)
   narrative.py       the report's three paragraphs, written from the evidence
   domain_features.py offline domain/IP features (registered domain, shared ASNs, DGA-like)
@@ -154,8 +159,11 @@ pip install -r requirements.txt
 
 A larger model gives better verdicts if your hardware allows it (for example
 `qwen2.5:14b` or `qwen2.5:32b`). Set `OLLAMA_MODEL` in `.env` to use it. The
-agent asks Ollama for a 16k-token context (`OLLAMA_NUM_CTX`); Ollama's 4k
-default is too small and would silently cut off the start of the prompt.
+agent asks Ollama for a 24k-token context (`OLLAMA_NUM_CTX`): the system
+prompt plus a case file measured 8-11k tokens, and follow-up tool results add
+more. Ollama's 4k default is far too small and silently cuts off the start of
+the prompt; a case whose prompt comes within 5% of the limit is marked for
+review.
 
 ### Optional: OpenRouter
 
@@ -169,17 +177,25 @@ where it left off.
 The flow data lives in a SuperNetFlow ClickHouse database (schema documented at
 https://supernetflow.com/database-schema). You need network access to your
 deployment and a read-only account; put the connection details in `.env`.
-Three tables are used:
+The tables used, and what each can and cannot show, are in
+[docs/schema.md](docs/schema.md), generated from `agent/schema.py` and
+verified against the deployed database (columns, TTLs, earliest data, column
+fill rates, IP formats). The points that matter most:
 
-- `canopus.subscriber_activity_1m`: per-minute traffic per (client, server,
-  port), with SNI, DNS and root domain. Keeps about 15 days. Queried in chunks
-  of at most 5 days, because larger queries hit ClickHouse's 200-million-row
-  read limit. This is also the only source of names for a server IP:
-  `public.dns_tuple` records which resolver a client asked, with no names.
-- `public.long_flow_summary`: one row per flow over a size/duration threshold.
-  Each flow is deleted 65 days after it finishes (a table TTL), and short
-  flows are missing. Reports flag cases whose evidence reaches that edge.
-- `canopus.asn`: ASN by CIDR, for flagged IPs with no flow rows.
+- `canopus.subscriber_activity_1m`: per minute, 15 days. The source for the
+  contact pattern (beacons), names and apps. Sorted by `subscriber_id`, so
+  per-host queries add it (looked up once per host) or they scan every row.
+  Rows labelled "Web Browsing" have no server IP.
+- `public.long_flow_summary`: only flows over 1 MB, deleted 65 days after
+  they finish. Good for large and held-open sessions; it cannot show beacons,
+  and no rows there means nothing.
+- `canopus_dbt.app_subscriber_server_enriched_5m`: 5-minute contact history
+  back to mid-2025, but it drops unlabelled (`_unknown`) traffic.
+- `canopus_dbt.subscriber_ip_load_enriched_1h`: host load and uptime.
+- `public.ux_sessions`, `canopus_dbt.app_server_enriched_1h`: recognised app
+  sessions and app labels per server.
+- `public.dns_tuple`: which external resolvers a host asks. No domain names
+  and no response codes on this deployment, so no NXDOMAIN rate.
 
 All timestamps are UTC. The retention periods and row limit above are from
 the deployment this was built on; yours may differ, and the query windows can

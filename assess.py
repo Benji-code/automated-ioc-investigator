@@ -59,18 +59,35 @@ It ends with EVIDENCE SIGNALS computed in code and a BASELINE VERDICT from \
 fixed rules. Use only the case file and tool results. Do not invent numbers, \
 hostnames or events. You have no internet access.
 
+How to read the evidence:
+- CONTACT PATTERN comes from per-minute data (subscriber_activity_1m, or the \
+5-minute table for older matches). "periodic_checkin" or "held_open" only \
+counts against the host when nothing explains it; an "explained by" reason \
+(a recognised app or session, a known service's client, a popular \
+destination) means the pattern is normal for that app.
+- long_flow_summary only holds flows over 1 MB. No rows there is NOT evidence \
+of anything, and it cannot show beacons.
+- APPS: SuperNetFlow's application labels and recognised sessions \
+(ux_sessions) for this traffic. A remote-access app explains traffic but is \
+itself an exposure. Platform comes from user agents where the host sent any.
+- DNS: dns_tuple shows which external resolvers the host asks directly, with \
+no domain names and no response codes, so there is no NXDOMAIN rate. An \
+unusual resolver or a high unanswered share is only a weak hint.
+
 Follow-up tools (all bound to this case's host; use them only if the case file \
 leaves a real question open):
 - timeline_around(time, minutes): what the host did around one time. Tells a \
 browsing burst apart from a lone automated connection.
 - host_baseline(days): the host's normal daily volume, destinations and hours.
 - compare_sessions(date_a, date_b): the host's traffic with the flagged IP on two dates.
-- run_sql(sql): anything else, read-only. Reference:
+- run_sql(sql): anything else, read-only. Filter on this case's client_ip or a \
+flagged server_ip and a time column; each table has a maximum span. Reference:
 {db.SCHEMA_CARD}
 Notes on this data:
 {db.DOMAIN_NOTES}
-Every run_sql query MUST filter on this case's client_ip AND a time column, or \
-it is rejected with an error saying why. Read the error and fix the query.
+Every run_sql query MUST filter on this case's client_ip (or a flagged \
+server_ip) AND a time column within the table's span, or it is rejected with \
+an error saying why. Read the error and fix the query.
 
 An IOC match is a starting point, not proof. Judge the behaviour, not the \
 match. Key points:
@@ -92,10 +109,10 @@ matched, the "Port check" line says whether the observed ports are the \
 service's own client ports (the host runs the service's client itself, which \
 is NOT what a C2 victim looks like) or other ports (e.g. a tunnel's public \
 port, which is what a victim of C2 hidden behind the service would use).
-- A held-open connection (few flows lasting hours or days at a steady packet \
-rate) is NOT a beacon. A beacon is many short flows at a regular interval. \
-Daily presence alone proves nothing. Use the "Flow pattern" and "Beacon-like" \
-lines as computed; do not re-derive them.
+- A held-open connection (one connection lasting hours or days at a steady \
+packet rate) is NOT a beacon. A beacon is many small contacts at a regular \
+interval. Daily presence alone proves nothing. Use the CONTACT PATTERN as \
+computed; do not re-derive it.
 - The host's other traffic (step 7) shows what kind of machine it is, e.g. a \
 home server running several tunnels, a gaming PC, a developer laptop.
 - Many campus hosts on one IP, a CDN ASN or a known public service point to \
@@ -182,15 +199,16 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
     names = _safe("indicator_names", tools.indicator_names, host, ip_list, window, case_rows, own_name)
     expected = tools.expected_behaviour(identity, server_ips, flows)
     held = (flows.get("classification") or {}).get("held_open") or {}
+    load = _safe("host_load_baseline", tools.host_load_baseline, host, identity)
     other_traffic = _safe("host_other_traffic", tools.host_other_traffic, host, window, ip_list, own_name,
-                          held.get("max_duration_sec"))
+                          held.get("max_duration_sec"), load)
 
     asn = [tools.ip_asn(ip, flows, server_ips) for ip in ip_list[: tools.MAX_PEER_IPS]]
-    passive_dns = []
+    names_on_ip = []
     for ip in ip_list[: tools.MAX_PEER_IPS]:
-        result = _safe("ip_passive_dns", tools.ip_passive_dns, ip, window, identity)
+        result = _safe("names_on_ip", tools.names_on_ip, ip, window, identity)
         result.setdefault("server_ip", ip)
-        passive_dns.append(result)
+        names_on_ip.append(result)
 
     feed_indicators = {m["indicator"] for ms in asset_index.values() for m in ms} - {identity["indicator"]}
     feature_names = [identity["indicator"]] if identity.get("indicator_type") == "domain" else []
@@ -205,6 +223,11 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
         result.setdefault("server_ip", ip)
         peers.append(result)
 
+    port = server_ips.get("indicator_port")
+    contact = _safe("beacon_analysis", tools.beacon_analysis, host, ip_list, port, window, case_rows)
+    app_context = _safe("app_context_for_indicator", tools.app_context_for_indicator, host, ip_list, window, identity)
+    host_apps = _safe("host_applications", tools.host_applications, host, window)
+    dns = _safe("host_dns_behaviour", tools.host_dns_behaviour, host, identity)
     shared = tools.shared_infrastructure(server_ips, flows, expected, peers)
     other_matches = [m for m in asset_index.get(host, []) if m["indicator"] != identity["indicator"]]
     ev = {
@@ -215,8 +238,13 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
         "flows": flows,
         "names": names,
         "asn": asn,
-        "passive_dns": passive_dns,
+        "names_on_ip": names_on_ip,
         "domain_features": features,
+        "contact": contact,
+        "app_context": app_context,
+        "host_apps": host_apps,
+        "dns": dns,
+        "load": load,
         "expected": expected,
         "other_traffic": other_traffic,
         "peers": peers,
@@ -396,7 +424,17 @@ def assess_evidence(identity: dict, ev: dict) -> dict:
         tools=tools.TOOL_SPECS,
         tool_executor=tool_executor,
     )
-    return finish_result(identity, ev, case_file, reply_text, tool_trace)
+    result = finish_result(identity, ev, case_file, reply_text, tool_trace)
+    result["prompt_tokens"] = llm_client.max_prompt_tokens
+    if config.PROVIDER == "ollama" and llm_client.max_prompt_tokens >= CONTEXT_WARN_SHARE * config.OLLAMA_NUM_CTX:
+        result["consistency_flags"].append(
+            f"The prompt reached {llm_client.max_prompt_tokens:,} of {config.OLLAMA_NUM_CTX:,} context tokens; "
+            "Ollama drops the start of an overflowing prompt, so raise OLLAMA_NUM_CTX.")
+        result["needs_review"] = True
+    return result
+
+
+CONTEXT_WARN_SHARE = 0.95
 
 
 def finish_result(identity: dict, ev: dict, case_file: str, reply_text: str, tool_trace: list[dict]) -> dict:

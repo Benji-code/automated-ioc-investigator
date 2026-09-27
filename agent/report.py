@@ -93,7 +93,7 @@ def _card(result: dict) -> str:
     paragraphs = result.get("report") or {}
     category = (result.get("behaviour") or {}).get("label", "")
     sections = "".join(
-        f"<h4>{e(heading)}</h4><p>{e(paragraphs.get(key, ''))}</p>"
+        f"<h4>{e(heading)}</h4>" + "".join(f"<p>{e(part)}</p>" for part in paragraphs[key].split("\n\n"))
         for key, heading in SECTIONS if paragraphs.get(key)
     )
     review = "<span class='review'>Human review</span>" if result.get("needs_review") else ""

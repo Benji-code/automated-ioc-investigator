@@ -26,6 +26,12 @@ RETRY_BACKOFF_SEC = 5.0
 RATE_LIMIT_BACKOFF_SEC = 20.0  # 429s need much longer than a transient 5xx to clear
 
 
+# Largest prompt (tokens) Ollama reported in the current run_agent call.
+# Ollama silently drops the START of a prompt that overflows num_ctx, so
+# assess.py flags a case whose prompt came close to it.
+max_prompt_tokens = 0
+
+
 class DailyQuotaExceeded(RuntimeError):
     """OpenRouter's free-tier daily request cap is used up. Retrying will not
     help - the whole batch should stop, not burn through remaining cases.
@@ -78,6 +84,8 @@ def _call_ollama(messages: list[dict], tools: list[dict] | None, model: str | No
     if "error" in data:
         raise RuntimeError(f"ollama error: {data['error']}")
 
+    global max_prompt_tokens
+    max_prompt_tokens = max(max_prompt_tokens, int(data.get("prompt_eval_count") or 0))
     raw = data.get("message", {})
     message = {"role": "assistant", "content": raw.get("content", "")}
     if raw.get("tool_calls"):
@@ -201,6 +209,8 @@ def run_agent(messages: list[dict], tools: list[dict] | None = None,
     already holds the must-run evidence, so follow-up calls are the model's
     own choice.
     """
+    global max_prompt_tokens
+    max_prompt_tokens = 0
     budget = max_tokens or config.MAX_TOKENS
     working_messages = list(messages)
     trace: list[dict] = []

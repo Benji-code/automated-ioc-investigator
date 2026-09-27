@@ -274,6 +274,25 @@ def feed_activity(case_rows: list[dict]):
     )
 
 
+def feed_minutes(case_rows: list[dict], server_ips: list[str]):
+    """The feed's matched minutes to the flagged IP(s) as a per-minute
+    contact series (beacon.py's columns). Only the matched minutes: not
+    evidence of anything outside them."""
+    import pandas as pd
+
+    rows = {}
+    for a in _activity_rows(case_rows):
+        if a.get("server_ip") not in server_ips or not a.get("time"):
+            continue
+        rows[a["time"]] = {"time": pd.Timestamp(a["time"]), "flows": int(a.get("flow_count") or 1),
+                           "up_bytes": int(a.get("up_volume__bytes") or 0),
+                           "down_bytes": int(a.get("down_volume__bytes") or 0),
+                           "up_pkts": int(a.get("up_volume__packets") or 0),
+                           "down_pkts": int(a.get("down_volume__packets") or 0)}
+    frame = pd.DataFrame(list(rows.values()))
+    return frame.sort_values("time") if not frame.empty else frame
+
+
 def match_windows(case_rows: list[dict], minutes: int) -> list[tuple[datetime, datetime]]:
     """±minutes around each feed match, merged where they overlap."""
     times = sorted({t for t in (_parse_time(r.get("threatfox", {}).get("first_seen_utc")) for r in case_rows) if t})

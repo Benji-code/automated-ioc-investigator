@@ -57,9 +57,10 @@ PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()  # optional
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")  # any locally pulled tool-calling model
-# Context window in tokens. The prompt plus case file is about 5-7k tokens;
-# Ollama's 4096 default would silently cut off the start of it.
-OLLAMA_NUM_CTX = _int_env("OLLAMA_NUM_CTX", 16384)
+# Context window in tokens. Measured (task 3): system prompt plus case file is
+# 8-11k tokens, and up to 4 tool rounds add more; Ollama silently drops the
+# START of a prompt that overflows. qwen2.5:7b supports 32k.
+OLLAMA_NUM_CTX = _int_env("OLLAMA_NUM_CTX", 24576)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Free models rotate; check https://openrouter.ai/models?max_price=0 if every
@@ -98,6 +99,37 @@ NAMES_WINDOW_MINUTES = _int_env("NAMES_WINDOW_MINUTES", 10)
 # Campus-wide lookups (passive DNS on the flagged IP, domain popularity) use
 # the most recent days of subscriber_activity_1m, one chunk.
 CAMPUS_LOOKUP_DAYS = min(_int_env("CAMPUS_LOOKUP_DAYS", 5), 5)
+
+# --- Contact pattern (beacon) thresholds, per-minute data (task 3) ----------
+# A periodic check-in needs enough repeats to judge an interval at all.
+BEACON_MIN_BURSTS = 6
+# Gap regularity (0-100, median/MAD of the gaps between burst starts) at or
+# above this counts as a regular interval. 70 means the typical deviation is
+# under 30% of the typical gap.
+BEACON_MIN_REGULARITY = 70.0
+# Bytes-per-burst consistency (0-100, 100 = identical sizes). Check-ins send
+# near-identical payloads; people do not.
+BEACON_MIN_VOLUME_CONSISTENCY = 60.0
+# Check-ins are small: median bytes per burst (up + down) at or below this.
+BEACON_MAX_BURST_BYTES = 100_000
+# Beacons run around the clock. A pattern with no activity between 00:00 and
+# 06:00 local time looks like a person, not a timer.
+BEACON_MIN_NIGHT_SHARE = 0.05
+# Held open: the host is in contact for most of the window, in long unbroken
+# runs, over about one flow.
+HELD_OPEN_MIN_DUTY_CYCLE = 0.5
+HELD_OPEN_MIN_RUN_MINUTES = 60
+HELD_OPEN_MAX_FLOWS_PER_MINUTE = 1.5
+# A keepalive is small per minute; more than this per minute is a transfer.
+HELD_OPEN_MAX_BYTES_PER_MINUTE = 200_000
+# Bulk transfer: a handful of bursts, each big.
+BULK_MAX_BURSTS = 5
+BULK_MIN_BURST_BYTES = 10_000_000
+# People are mostly awake: under this night share counts as waking hours.
+HUMAN_MAX_NIGHT_SHARE = 0.15
+# A destination used by at least this many OTHER campus hosts is a popular
+# service, which explains a periodic pattern (many devices check in to it).
+POPULAR_DESTINATION_MIN_HOSTS = 5
 
 # --- Calibration thresholds ------------------------------------------------
 # A flow only supports an "exfiltration" claim if it is this upload-heavy.

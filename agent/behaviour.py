@@ -18,6 +18,7 @@ CATEGORIES = {
     "remote_access_client": "Remote access (VPN)",
     "tunnel_public_port": "Connection to a tunnel's public port",
     "beaconing": "C2-like beaconing",
+    "periodic_explained": "Periodic check-ins by a recognised app or service",
     "persistent_connection": "Persistent connection to an unrecognised service",
     "download": "File download",
     "web_visit_flagged": "Web visit to the flagged site",
@@ -63,9 +64,14 @@ def classify(ev: dict) -> dict:
     classification = flows.get("classification", {})
     ports = _ports(ev)
     web_only = bool(ports) and all(port in WEB_PORTS for port, _ in ports)
-    if classification.get("beacon_like"):
+    contact = _signal(ev, "contact_pattern")
+    pattern = (ev.get("contact") or {}).get("pattern")
+    if pattern == "periodic_checkin" and contact.get("direction") == signals.SUPPORTS:
         return _category("beaconing")
-    if classification.get("held_open") and not web_only:
+    if pattern == "periodic_checkin":
+        return _category("periodic_explained")
+    held = classification.get("held_open") or pattern == "held_open"
+    if held and not web_only:
         return _category("persistent_connection")
     threat_type = (ev["identity"].get("threat_type") or "").lower()
     if threat_type == "payload_delivery" and _is_download(ev):

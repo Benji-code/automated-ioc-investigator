@@ -5,7 +5,7 @@ so the model (and a reviewer reading the saved case file) can trace it.
 """
 from __future__ import annotations
 
-from . import config
+from . import config, schema
 from .analysis import fmt_bytes, fmt_duration
 
 LFS = "long_flow_summary"
@@ -47,7 +47,10 @@ def _host_line(host: dict | None) -> str:
     host = host or {}
     if "error" in host:
         return "  (host name lookup failed)"
-    return f"  Host name (reverse DNS): {host.get('hostname') or 'none (no PTR record)'}"
+    ids = ", ".join(host.get("subscriber_ids") or []) or "unknown"
+    return (f"  Host name (reverse DNS): {host.get('hostname') or 'none (no PTR record)'}; subscriber_id: {ids} "
+            "(add subscriber_id = '...' to run_sql queries on subscriber_activity_1m and the 5-minute table, "
+            "or they scan every row in the window)")
 
 
 def _ioc_section(identity: dict, host: dict | None = None) -> str:
@@ -164,8 +167,8 @@ def _activity_port_lines(ports: list[dict]) -> str:
 
 
 def _classification_lines(c: dict) -> str:
-    lines = [f"  Flow pattern ({LFS}): {c['pattern']} - {c['description']}",
-             f"  Beacon-like: {'YES' if c['beacon_like'] else 'no'}"]
+    lines = [f"  Large-flow pattern ({LFS}, flows over 1 MB only): {c['pattern']} - {c['description']}",
+             "  (Check-ins and beacons are judged in CONTACT PATTERN below, from per-minute data, not here.)"]
     held = c.get("held_open")
     if held:
         steady = "steady" if held["packet_rate_steady"] else "NOT steady"
@@ -183,17 +186,9 @@ def _classification_lines(c: dict) -> str:
         )
         lines.append("  Held-open flows:")
         lines.extend(_flow_line(f) for f in held["flows"])
-    short = c.get("short_flows") or {}
-    checkins = short.get("checkin_analysis")
-    if checkins:
-        lines.append(
-            f"  Shorter flows: {short['count']}; median interval {fmt_duration(checkins['median_interval_sec'])}, "
-            f"regularity {checkins['regularity_score']}/100, median duration "
-            f"{fmt_duration(checkins['median_duration_sec'])}, size consistency {checkins['size_consistency_score']}/100 "
-            f"-> {'regular check-ins' if checkins['regular_checkins'] else 'not regular check-ins'}."
-        )
-    elif short:
-        lines.append(f"  Shorter flows: {short.get('count', 0)} (too few to judge an interval).")
+    other = c.get("other_flows") or {}
+    if other.get("count"):
+        lines.append(f"  Other flows over 1 MB (under an hour): {other['count']}.")
     return "\n".join(lines)
 
 
@@ -227,7 +222,9 @@ def _held_open_keys(classification: dict) -> set[tuple]:
 
 
 def _flows_section(flows: dict) -> str:
-    header = "[STEP 5] FLOWS BETWEEN HOST AND FLAGGED IP(S)"
+    header = ("[STEP 5] FLOWS BETWEEN HOST AND FLAGGED IP(S)\n"
+              "  (long_flow_summary: only flows over 1 MB, so small or short connections are not in it; "
+              "subscriber_activity_1m: per minute, about 15 days kept)")
     error = _error_line(flows)
     if error:
         return f"{header}\n{error}"
@@ -274,7 +271,10 @@ def _names_section(names: dict) -> str:
     header = "[STEP 5b] NAMES THE HOST ACTUALLY USED ON THE FLAGGED IP(S)"
     if "error" in names:
         return f"{header}\n{_error_line(names)}"
-    source = {"live": f"{SA}, queried live", "feed": f"{SA}, {FEED_LABEL}"}.get(names["source"])
+    source = {"live": f"{SA}, queried live", "feed": f"{SA}, {FEED_LABEL}",
+              "long_flows": "long_flow_summary attributes.sni, flows over 1 MB only",
+              "long_flows+feed": f"long_flow_summary attributes.sni (flows over 1 MB) and {SA} {FEED_LABEL}"
+              }.get(names["source"])
     if not source:
         return f"{header}\n  No SNI or DNS names recorded for this host on the flagged IP."
     lines = [f"{header} ({source}; minutes within ±{config.NAMES_WINDOW_MINUTES} min of a feed match in brackets)"]
@@ -335,7 +335,8 @@ def _bytes_by_table(by_table: dict) -> str:
 
 
 def _other_traffic_section(other: dict) -> str:
-    header = "[STEP 7] HOST'S TRAFFIC TO OTHER IPS"
+    header = ("[STEP 7] HOST'S TRAFFIC TO OTHER IPS\n"
+              "  (subscriber_activity_1m: per minute, about 15 days kept; long_flow_summary: flows over 1 MB only)")
     error = _error_line(other)
     if error:
         return f"{header}\n{error}"
@@ -367,21 +368,25 @@ Window: {LFS} {window['long_flow_summary']}; {SA} {window['subscriber_activity_1
 {long_lived}
   Root domains contacted, busiest first ({SA}, {other['distinct_root_domains']} distinct): {domains}
   Operating-system hints from those domains: {_platform_text(other.get('platform_hints') or {})}
-  {uptime_text(other.get('uptime') or {})}"""
+  {uptime_text(other.get('uptime') or {})} (subscriber_ip_load_enriched_1h)"""
 
 
 def uptime_text(uptime: dict) -> str:
-    """Uptime evidence for the host's role (always-on server vs part-time device)."""
+    """Uptime evidence for the host's role, from night vs daytime volume."""
     parts = []
     if uptime.get("longest_connection_sec"):
         parts.append(f"longest single connection held open {fmt_duration(uptime['longest_connection_sec'])}")
-    if uptime.get("median_active_hours") is not None:
-        parts.append(f"active in a median {uptime['median_active_hours']:.0f} of 24 hours a day over "
-                     f"{uptime['days']} day(s)")
-    verdict = {True: "an always-on machine (like a server), not a part-time device",
-               False: "a part-time device (like a laptop or phone), not an always-on server",
-               None: "not clear whether it is always on"}[uptime.get("always_on")]
-    return f"Uptime: {'; '.join(parts) or 'no data'} -> {verdict}."
+    if uptime.get("night_day_ratio") is not None:
+        parts.append(f"night (00-06 local) volume {fmt_bytes(uptime['night_bytes_per_hour'])}/hour vs daytime "
+                     f"{fmt_bytes(uptime['day_bytes_per_hour'])}/hour ({uptime['night_day_ratio']:.0%})")
+    if uptime.get("night_day_ratio") is None:
+        verdict = "no hourly load data"
+    else:
+        verdict = {True: "busy around the clock (server-like)",
+                   False: "used in waking hours only (a personal device that sleeps at night)",
+                   None: "connected all the time with little traffic at night: background traffic, which says "
+                         "nothing about what the machine is"}[uptime.get("always_on")]
+    return f"Uptime: {'; '.join(parts) or 'no data'} -> {verdict}. Every host shows some traffic every hour, so only volume counts."
 
 
 def _retention_line(flows: dict) -> str:
@@ -431,12 +436,13 @@ def _peers_section(peers: list[dict], shared: dict) -> str:
     return "\n".join(lines)
 
 
-def _passive_dns_section(passive_dns: list[dict]) -> str:
-    header = f"[STEP 8b] OTHER NAMES ON THE FLAGGED IP, CAMPUS-WIDE ({SA})"
-    if not passive_dns:
+def _names_on_ip_section(names_on_ip: list[dict]) -> str:
+    header = (f"[STEP 8b] OTHER NAMES ON THE FLAGGED IP, CAMPUS-WIDE\n"
+              f"  ({SA} queried one day at a time, plus long_flow_summary attributes.sni)")
+    if not names_on_ip:
         return f"{header}\n  (no IP to look up)"
     lines = [header]
-    for p in passive_dns:
+    for p in names_on_ip:
         if "error" in p:
             lines.append(f"  {p.get('server_ip', '?')}: could not query ClickHouse: {p['error']}")
             continue
@@ -449,6 +455,96 @@ def _passive_dns_section(passive_dns: list[dict]) -> str:
         if not p["domains"]:
             lines.append("    (no named traffic on this IP in the period)")
     return "\n".join(lines)
+
+
+def _contact_section(contact: dict) -> str:
+    header = "[STEP 5c] CONTACT PATTERN WITH THE FLAGGED IP (beacon check)"
+    if "error" in contact:
+        return f"{header}\n{_error_line(contact)}"
+    table = contact.get("source", "none")
+    names = {"subscriber_activity_1m": "canopus.subscriber_activity_1m",
+             "app_subscriber_server_enriched_5m": "canopus_dbt.app_subscriber_server_enriched_5m"}
+    note = schema.source_note(names[table]) if table in names else f"(from the {table})"
+    f = contact.get("features", {})
+    lines = [header, f"  {note}".rstrip(), f"  Pattern: {contact['pattern']} - {contact['description']}"]
+    if contact.get("note"):
+        lines.append(f"  Note: {contact['note']}")
+    if f.get("active_minutes"):
+        lines.append(
+            f"  Window {contact.get('window', '?')}, {contact['resolution_min']}-minute resolution: "
+            f"{f['active_minutes']} active minute(s) in {f['bursts']} burst(s) from {f['first']} to {f['last']}; "
+            f"duty cycle {f['duty_cycle']:.0%} of that span; median burst {f['median_burst_min']:.0f} min, "
+            f"longest run {f['longest_run_min']} min")
+        lines.append(
+            f"  Gaps between bursts: median {f['median_gap_min'] if f['median_gap_min'] is not None else '-'} min, "
+            f"regularity {f['gap_regularity'] if f['gap_regularity'] is not None else '-'}/100; bytes per burst: "
+            f"median {fmt_bytes(f['median_burst_up_bytes'])} up / {fmt_bytes(f['median_burst_down_bytes'])} down, "
+            f"consistency {f['volume_consistency'] if f['volume_consistency'] is not None else '-'}/100")
+        flows = f"; flows active per minute: median {f['flows_per_minute']:.1f}" if f.get("flows_per_minute") is not None else ""
+        lines.append(f"  Time of day ({config.LOCAL_TIMEZONE}): {f['hour_spread']} of 24 hours, night (00-06) share "
+                     f"{f['night_share']:.0%}{flows}")
+        lines.append(f"  Burst starts (first {len(f['burst_starts'])}): {', '.join(f['burst_starts'])}")
+    return "\n".join(lines)
+
+
+def _apps_section(app_context: dict, host_apps: dict) -> str:
+    header = "[STEP 5d] APPS AND PLATFORM"
+    lines = [header, "  (from app_subscriber_server_enriched_5m, ux_sessions, app_server_enriched_1h and "
+             "subscriber_activity_1m; SuperNetFlow's own app labels, '_unknown' when it has none)"]
+    if "error" in app_context:
+        lines.append(_error_line(app_context))
+    else:
+        host = ", ".join(f"{a['application']} ({a['category']}, {a['class']})" for a in app_context.get("host_apps", []))
+        lines.append(f"  Labels on this host's traffic to the flagged IP: {host or 'none'}")
+        sessions = ", ".join(f"{x['sessions']} {x['type']} ({x['provider']})" for x in app_context.get("host_sessions", []))
+        lines.append(f"  Recognised app sessions on this IP for this host: {sessions or 'none'}")
+        campus = ", ".join(f"{a['application']} ({a['category']}, up to {a['peak_hosts']} hosts/hour)"
+                           for a in app_context.get("campus_apps", []))
+        lines.append(f"  Campus-wide labels for the IP: {campus or 'none'}")
+        lines.append(f"  Explained by: {app_context.get('explained_by') or 'nothing'}"
+                     + (f"; remote-access app: {app_context['remote_access_app']}" if app_context.get("remote_access_app") else ""))
+    if "error" in host_apps:
+        lines.append(_error_line(host_apps))
+    else:
+        cats = "; ".join(f"{c['category']} {c['minutes']} min" + (f" ({', '.join(c['apps'])})" if c["apps"] else "")
+                         for c in host_apps.get("categories", []))
+        lines.append(f"  The host's apps overall (subscriber_activity_1m): {cats or 'none in retention'}")
+        if host_apps.get("remote_access_apps"):
+            lines.append(f"  Remote-access apps on the host: {', '.join(host_apps['remote_access_apps'])}")
+        if host_apps.get("privacy_vpn_apps"):
+            lines.append(f"  VPNs or privacy relays on the host: {', '.join(host_apps['privacy_vpn_apps'])}")
+        agents = host_apps.get("user_agent_platforms") or {}
+        lines.append("  Platform from user agents: " + (", ".join(f"{k} ({v} min)" for k, v in agents.items())
+                                                         if agents else "none sent"))
+    return "\n".join(lines)
+
+
+def _dns_section(dns: dict) -> str:
+    header = "[STEP 7b] DNS BEHAVIOUR"
+    lines = [header, "  (from dns_tuple: resolver statistics only, NOT domain names; response codes are not recorded "
+             "here, so there is no NXDOMAIN rate)"]
+    if "error" in dns:
+        return "\n".join(lines + [_error_line(dns)])
+    if not dns.get("present"):
+        return "\n".join(lines + [f"  {dns.get('note', 'no data')} ({dns.get('period', '')})."])
+    for r in dns.get("resolvers", []):
+        kind = f"public: {r['public_resolver']}" if r["public_resolver"] else ("RARE on campus" if r["rare"] else "")
+        lines.append(f"    - {r['server_ip']}: {r['answered']} answered, {r['unanswered']} unanswered, "
+                     f"{r['campus_clients']} campus client(s) in a day" + (f" [{kind}]" if kind else ""))
+    median = dns["campus_median_unanswered_ratio"]
+    lines.append(f"  Unanswered share {dns['unanswered_ratio']:.0%} vs campus median "
+                 f"{f'{median:.0%}' if median is not None else '?'}"
+                 + (" -> HIGH" if dns.get("unanswered_high") else ""))
+    return "\n".join(lines)
+
+
+def _load_section(load: dict) -> str:
+    if "error" in load or "median_daily_up" not in load:
+        return ""
+    stands = load.get("match_hours_vs_typical")
+    return (f"  Host load ({load['period']}, subscriber_ip_load_enriched_1h): median day "
+            f"{fmt_bytes(load['median_daily_up'])} up / {fmt_bytes(load['median_daily_down'])} down"
+            + (f"; hours around the match carried {stands}x a typical hour" if stands is not None else ""))
 
 
 def signals_table(signals: list[dict]) -> str:
@@ -504,11 +600,18 @@ ThreatFox confidence rates the indicator, not this host.
 
 {_names_section(ev.get('names', {"source": "none", "names": []}))}
 
+{_contact_section(ev.get('contact') or {"pattern": "insufficient_data", "description": "not run", "features": {}})}
+
+{_apps_section(ev.get('app_context') or {}, ev.get('host_apps') or {})}
+
 {_other_traffic_section(ev['other_traffic'])}
+{_load_section(ev.get('load') or {})}
+
+{_dns_section(ev.get('dns') or {"present": False})}
 
 {_peers_section(ev['peers'], ev['shared'])}
 
-{_passive_dns_section(ev.get('passive_dns', []))}
+{_names_on_ip_section(ev.get('names_on_ip', []))}
 
 {_other_matches_section(ev['other_matches'])}
 

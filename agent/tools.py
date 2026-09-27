@@ -10,7 +10,7 @@ file before the model sees it:
   indicator_flows      step 5  flows between the host and the flagged IP(s),
                                falling back to the feed's own evidence
   indicator_names      step 5  names (SNI/DNS) the host used on the flagged IP
-  ip_passive_dns       step 8  names on the flagged IP, campus-wide
+  names_on_ip       step 8  names on the flagged IP, campus-wide
   domain_features      step 4  offline features, campus popularity, first seen
   host_other_traffic   step 7  the host's traffic to everything else
   indicator_peers      step 8  other internal hosts contacting the flagged IP
@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
-from . import analysis, config, db, domain_features as dfeat, evidence, knowledge
+from . import analysis, beacon, config, db, domain_features as dfeat, evidence, knowledge
 from .evidence import CaseWindow
 
 MAX_PEER_IPS = 3  # peer lookups per case, for indicators that map to several IPs
@@ -102,7 +102,7 @@ def execute(name: str, arguments: dict, *, client_ip: str, server_ips: list[str]
             sql = str(arguments.get("sql", "")).strip()
             if not sql:
                 return {"error": "a 'sql' argument is required"}
-            return {"sql": sql, "result": db.run_sql(sql, client_ip)}
+            return {"sql": sql, "result": db.run_sql(sql, client_ip, server_ips or [])}
         if name == "timeline_around":
             return timeline_around(client_ip, str(arguments.get("time", "")), arguments.get("minutes"))
         if name == "host_baseline":
@@ -140,8 +140,9 @@ def _reverse_dns(ip: str) -> str | None:
 def host_identity(ip: str) -> dict:
     """The host's name from reverse DNS: a fact. What the name suggests
     (a lab machine, a residence) is left to the model's HOST_ROLE, and the
-    report labels it as the agent's unconfirmed reading."""
-    return {"ip": ip, "hostname": _reverse_dns(ip)}
+    report labels it as the agent's unconfirmed reading. The subscriber_id
+    is SuperNetFlow's key for the host (used to keep queries fast)."""
+    return {"ip": ip, "hostname": _reverse_dns(ip), "subscriber_ids": list(db.subscriber_ids(ip))}
 
 
 # --- step 3 --------------------------------------------------------------------
@@ -404,10 +405,29 @@ def indicator_names(host: str, server_ips: list[str], window: CaseWindow, case_r
     live = db.fetch_indicator_names(host, server_ips, window.activity_start, window.activity_end, windows, own_name)
     if not live.empty:
         return summarise_names(live, "live")
+    try:
+        flow_names = db.fetch_indicator_flow_names(host, server_ips, window.flow_start, window.flow_end)
+    except Exception:  # noqa: BLE001 - fall through to the feed's names
+        flow_names = pd.DataFrame()
+    flow_names = flow_names[(flow_names["sni_name"] != "") | (flow_names["dns_name"] != "")] if not flow_names.empty else flow_names
+    # Per-minute data has expired: combine both remaining sources, since each
+    # can hold names the other lacks (flow attributes can be only an ECH
+    # placeholder while the feed kept the real SNI).
+    frames = []
+    if not flow_names.empty:
+        frames.append(pd.DataFrame({"sni": flow_names["sni_name"], "dns": flow_names["dns_name"],
+                                    "root_domain": [dfeat.registered_domain(a or b) for a, b in
+                                                    zip(flow_names["sni_name"], flow_names["dns_name"])],
+                                    "server_port": 0, "transport_protocol": 6, "minutes": flow_names["flows"],
+                                    "near_match_minutes": 0, "up_bytes": flow_names["up_bytes"],
+                                    "down_bytes": flow_names["down_bytes"]}))
     feed = evidence.feed_activity(case_rows)
-    if feed.empty:
-        return summarise_names(feed, "none")
-    return summarise_names(feed.assign(near_match_minutes=feed["minutes"]), "feed")
+    if not feed.empty:
+        frames.append(feed.assign(near_match_minutes=feed["minutes"]))
+    if not frames:
+        return summarise_names(pd.DataFrame(), "none")
+    source = "feed" if len(frames) == 1 and flow_names.empty else ("long_flows" if len(frames) == 1 else "long_flows+feed")
+    return summarise_names(pd.concat(frames, ignore_index=True), source)
 
 
 # --- step 8: what else lives on the flagged IP (task 2, 2.2) ------------------------------
@@ -431,7 +451,7 @@ def _match_end(identity: dict | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def summarise_passive_dns(frame: pd.DataFrame, host_count: int | None) -> dict:
+def summarise_names_on_ip(frame: pd.DataFrame, host_count: int | None) -> dict:
     """Distinct root domains on the IP and how many campus hosts used each."""
     domains: dict[str, dict] = {}
     ech_hosts = 0
@@ -452,14 +472,31 @@ def summarise_passive_dns(frame: pd.DataFrame, host_count: int | None) -> dict:
             "ech_hidden_hosts": ech_hosts, "domains": listed[:MAX_LISTED_NAMES]}
 
 
-def ip_passive_dns(server_ip: str, window: CaseWindow, identity: dict | None = None) -> dict:
-    """Campus-wide: names seen on the flagged IP and how many hosts used each."""
+def names_on_ip(server_ip: str, window: CaseWindow, identity: dict | None = None) -> dict:
+    """Campus-wide: names seen on the flagged IP and how many hosts used each.
+    subscriber_activity_1m has no index on server_ip, so it is queried one
+    day at a time (db.CAMPUS_CHUNK_DAYS); long_flow_summary's attributes.sni
+    adds names for flows over 1 MB. Host counts are per-day maxima (a lower
+    bound)."""
     start, end, is_current = _campus_period(window, match_end=_match_end(identity))
-    frame = db.fetch_ip_passive_dns(server_ip, start, end)
-    host_count = db.fetch_ip_host_count(server_ip, start, end)
+    frames = []
+    host_count = 0
+    for day_start, day_end in db.time_chunks(start, end, db.CAMPUS_CHUNK_DAYS):
+        day = db.fetch_names_on_ip(server_ip, day_start, day_end)
+        if not day.empty:
+            frames.append(day)
+        host_count = max(host_count, db.fetch_ip_host_count(server_ip, day_start, day_end))
+    frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
+        columns=["root_domain", "sni", "dns", "hosts", "minutes"])
+    long_flows = db.fetch_names_on_ip_long_flows(server_ip, start, end)
+    if not long_flows.empty:
+        extra = pd.DataFrame({"root_domain": [dfeat.registered_domain(n) for n in long_flows["sni_name"]],
+                              "sni": long_flows["sni_name"], "dns": "", "hosts": long_flows["hosts"], "minutes": 0})
+        frame = pd.concat([frame, extra], ignore_index=True)
     period = f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC"
     return {"server_ip": server_ip, "period": period, "period_is_current": is_current,
-            **summarise_passive_dns(frame, host_count)}
+            "sources": "subscriber_activity_1m (per day) and long_flow_summary attributes.sni",
+            **summarise_names_on_ip(frame, host_count)}
 
 
 def ip_asn(server_ip: str, flows_result: dict, server_ips: dict) -> dict:
@@ -482,7 +519,18 @@ def ip_asn(server_ip: str, flows_result: dict, server_ips: dict) -> dict:
             looked_up = None
         if looked_up:
             asn, org, source = looked_up["asn"], looked_up["asn_org"], f"canopus.asn ({looked_up['cidr']})"
-    return {"server_ip": server_ip, "asn": asn, "asn_org": org, "source": source,
+    country = ""
+    for server in flows_result.get("activity", {}).get("servers", []):
+        if server["server_ip"] == server_ip and server.get("country"):
+            country = server["country"][0]
+    if not country:
+        try:
+            geo = db.fetch_geo(server_ip)
+        except Exception:  # noqa: BLE001 - country is a nice-to-have
+            geo = None
+        if geo:
+            country = geo["country"]
+    return {"server_ip": server_ip, "asn": asn, "asn_org": org, "source": source, "country": country,
             "shared_asn": dfeat.asn_kind(asn), "shared_range": dfeat.ip_range_match(server_ip)}
 
 
@@ -618,46 +666,276 @@ def compare_sessions(client_ip: str, server_ips: list[str], date_a: str, date_b:
     return {"a": _day_summary(client_ip, server_ips, days[0]), "b": _day_summary(client_ip, server_ips, days[1])}
 
 
+# --- task 3: contact pattern (per-minute), apps, DNS, load ------------------------------
+
+def _minutes(start: datetime, end: datetime) -> float:
+    return (end - start).total_seconds() / 60
+
+
+def beacon_analysis(host: str, server_ips: list[str], port: int | None, window: CaseWindow,
+                    case_rows: list[dict] | None = None) -> dict:
+    """Contact pattern with the flagged IP from per-minute data
+    (subscriber_activity_1m). For matches past its 15-day retention: the
+    5-minute table (no port, coarser, and it drops '_unknown' traffic, so it
+    only sees labelled apps), then the IOC feed's own matched minutes. Never
+    from long_flow_summary."""
+    if not server_ips:
+        return beacon.analyse(pd.DataFrame(), 1, 1, "none")
+    now = datetime.now(timezone.utc)
+    if window.activity_start is not None:
+        end = min(window.activity_end, now)
+        frame = db.fetch_contact_series_1m(host, server_ips, port, window.activity_start, end)
+        if not frame.empty:
+            result = beacon.analyse(frame, 1, _minutes(window.activity_start, end), "subscriber_activity_1m")
+            result["window"] = f"{window.activity_start:%Y-%m-%d} to {end:%Y-%m-%d}"
+            return result
+    end = min(window.flow_end, now)
+    frame = db.fetch_contact_series_5m(host, server_ips, window.flow_start, end)
+    if not frame.empty:
+        result = beacon.analyse(frame, 5, _minutes(window.flow_start, end), "app_subscriber_server_enriched_5m")
+        result["window"] = f"{window.flow_start:%Y-%m-%d} to {end:%Y-%m-%d}"
+        result["note"] = ("past subscriber_activity_1m's 15-day retention, so the 5-minute table was used; it only "
+                          "holds traffic SuperNetFlow labelled as an app")
+        return result
+    feed = evidence.feed_minutes(case_rows or [], server_ips)
+    result = beacon.analyse(feed, 1, max(len(feed), 1), "IOC feed")
+    result["note"] = ("per-minute data has expired and the 5-minute table has no labelled traffic to the IP, so "
+                      "this uses only the feed's own matched minutes, not re-queried: it cannot show a pattern "
+                      "outside those minutes")
+    return result
+
+
+def _explained_label(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+    """(explanation, remote-access app) from app labels on the host's traffic
+    to the flagged IP, most-used first."""
+    remote = None
+    for row in frame.sort_values("minutes", ascending=False).itertuples(index=False):
+        kind = knowledge.app_class(row.application, row.application_category, config.ORG_NAME)
+        if kind == "remote_access" and not remote:
+            remote = f"{row.application} ({row.application_category})"
+        if kind in ("benign", "vendor", "privacy_vpn"):
+            return f"SuperNetFlow classifies it as {row.application} ({row.application_category})", remote
+    return None, remote
+
+
+def app_context_for_indicator(host: str, server_ips: list[str], window: CaseWindow, identity: dict) -> dict:
+    """Does SuperNetFlow tie the flagged IP to a known app, for this host or
+    campus-wide, and was it part of a recognised app session?"""
+    if not server_ips:
+        return {"explained_by": None}
+    now = datetime.now(timezone.utc)
+    end = min(window.flow_end, now)
+    host_apps = db.fetch_indicator_apps(host, server_ips, window.flow_start, end)
+    if not host_apps.empty:  # chunks repeat labels: re-aggregate
+        host_apps = host_apps.groupby(["application", "application_category"], as_index=False)[["buckets", "minutes"]].sum()
+    host_sessions = db.fetch_ux_sessions(host, server_ips, window.flow_start, end)
+    match_end = _match_end(identity) or end
+    campus_start, campus_end = match_end - timedelta(days=7), min(match_end + timedelta(days=1), now)
+    campus_apps = db.fetch_server_apps_campus(server_ips, campus_start, campus_end)
+    campus_sessions = db.fetch_ux_sessions(None, server_ips, campus_start, campus_end)
+
+    explained, remote = (None, None)
+    if not host_apps.empty:
+        explained, remote = _explained_label(host_apps)
+    if not host_sessions.empty:
+        top = host_sessions.iloc[0]
+        explained = (f"part of {int(host_sessions['sessions'].sum())} recognised {top['type']} session(s) "
+                     f"({top['provider']})")
+    return {
+        "host_apps": [{"application": r.application, "category": r.application_category, "minutes": int(r.minutes),
+                       "class": knowledge.app_class(r.application, r.application_category, config.ORG_NAME)}
+                      for r in host_apps.sort_values("minutes", ascending=False).head(5).itertuples(index=False)]
+        if not host_apps.empty else [],
+        "host_sessions": _session_rows(host_sessions),
+        "campus_apps": [{"application": r.application, "category": r.application_category,
+                         "peak_hosts": int(r.peak_hosts)} for r in campus_apps.head(5).itertuples(index=False)]
+        if not campus_apps.empty else [],
+        "campus_sessions": _session_rows(campus_sessions),
+        "explained_by": explained,
+        "remote_access_app": remote,
+        "sources": "app_subscriber_server_enriched_5m, ux_sessions, app_server_enriched_1h",
+    }
+
+
+def _session_rows(frame: pd.DataFrame) -> list[dict]:
+    if frame.empty:
+        return []
+    return [{"type": r.type, "provider": r.provider, "sessions": int(r.sessions), "hosts": int(r.hosts)}
+            for r in frame.head(5).itertuples(index=False)]
+
+
+def host_applications(host: str, window: CaseWindow) -> dict:
+    """What apps the host uses (subscriber_activity_1m) and which platform its
+    user agents point to (subscriber_activity_1m and long_flow_summary)."""
+    now = datetime.now(timezone.utc)
+    activity_end = min(window.activity_end, now) if window.activity_end else None
+    apps = db.fetch_host_applications(host, window.activity_start, activity_end)
+    if not apps.empty:  # chunks repeat labels: re-aggregate
+        apps = apps.groupby(["application_category", "application"], as_index=False)[["minutes", "up_bytes", "down_bytes"]].sum()
+    agents = db.fetch_host_user_agents(host, window.activity_start, activity_end, window.flow_start,
+                                       min(window.flow_end, now))
+    categories = []
+    remote = []
+    relays = []
+    if not apps.empty:
+        by_category = apps.groupby("application_category")["minutes"].sum().sort_values(ascending=False)
+        for category, minutes in by_category.head(6).items():
+            top = apps[apps["application_category"] == category].sort_values("minutes", ascending=False)
+            categories.append({"category": category, "minutes": int(minutes),
+                               "apps": [a for a in top["application"].head(3) if a not in ("_unknown", "Web Browsing")]})
+        for row in apps.itertuples(index=False):
+            kind = knowledge.app_class(row.application, row.application_category)
+            if kind == "remote_access":
+                remote.append(row.application)
+            elif kind == "privacy_vpn":
+                relays.append(row.application)
+    platforms: dict[str, int] = {}
+    for row in agents.itertuples(index=False):
+        platform = analysis.platform_from_user_agent(row.agent)
+        if platform:
+            platforms[platform] = platforms.get(platform, 0) + int(row.minutes)
+    return {"categories": categories, "remote_access_apps": sorted(set(remote)),
+            "privacy_vpn_apps": sorted(set(relays)),
+            "user_agent_platforms": dict(sorted(platforms.items(), key=lambda kv: -kv[1])),
+            "user_agents_seen": int(len(agents)),
+            "sources": "subscriber_activity_1m (apps, user_agent), long_flow_summary (attributes.http_user_agent)"}
+
+
+RARE_RESOLVER_MAX_CLIENTS = 2      # a DNS server this few campus hosts use is unusual
+UNANSWERED_RATIO_MULTIPLE = 3.0    # host's unanswered share this many times the campus median ...
+UNANSWERED_RATIO_MIN = 0.2         # ... and at least this high counts as unusual
+
+
+def host_dns_behaviour(host: str, identity: dict) -> dict:
+    """External resolvers the host asks directly (dns_tuple), how common each
+    is on campus, and the host's unanswered share against the campus median.
+    dns_tuple has no names and no response codes here, so no NXDOMAIN rate."""
+    now = datetime.now(timezone.utc)
+    match_end = _match_end(identity) or now
+    end = min(match_end + timedelta(days=1), now)
+    start = end - timedelta(days=14)
+    frame = db.fetch_host_dns(host, start, end)
+    period = f"{start:%Y-%m-%d} to {end:%Y-%m-%d}"
+    if frame.empty:
+        return {"present": False, "period": period,
+                "note": "no direct external DNS seen (the host uses the campus resolvers, which the sensor does not see)"}
+    baseline_start = end - timedelta(days=1)
+    clients, campus_median = db.fetch_dns_campus_baseline(list(frame["server_ip"]), baseline_start, end)
+    client_counts = dict(zip(clients["server_ip"], clients["clients"])) if not clients.empty else {}
+    resolvers = []
+    for row in frame.itertuples(index=False):
+        public = row.server_ip in knowledge.PUBLIC_RESOLVERS
+        count = int(client_counts.get(row.server_ip, 0))
+        resolvers.append({"server_ip": row.server_ip, "answered": int(row.answered), "unanswered": int(row.unanswered),
+                          "campus_clients": count, "public_resolver": knowledge.PUBLIC_RESOLVERS.get(row.server_ip),
+                          "rare": (not public) and count <= RARE_RESOLVER_MAX_CLIENTS})
+    try:
+        public_share = db.fetch_dns_public_only_share(list(knowledge.PUBLIC_RESOLVERS), baseline_start, end)
+    except Exception:  # noqa: BLE001 - only used for wording
+        public_share = None
+    answered = int(frame["answered"].sum())
+    unanswered = int(frame["unanswered"].sum())
+    ratio = unanswered / max(answered + unanswered, 1)
+    high = (campus_median is not None and ratio >= UNANSWERED_RATIO_MIN
+            and ratio >= UNANSWERED_RATIO_MULTIPLE * max(campus_median, 0.01))
+    return {"present": True, "period": period, "resolvers": resolvers[:8],
+            "unanswered_ratio": round(ratio, 3), "campus_median_unanswered_ratio":
+                round(campus_median, 3) if campus_median is not None else None,
+            "unanswered_high": bool(high),
+            "rare_resolvers": [r["server_ip"] for r in resolvers if r["rare"]],
+            "campus_public_only_share": round(public_share, 2) if public_share is not None else None,
+            "sources": "dns_tuple (no names or response codes here)"}
+
+
+def host_load_baseline(host: str, identity: dict) -> dict:
+    """The host's hourly load over two weeks up to the match
+    (subscriber_ip_load_enriched_1h, which keeps long history): night vs
+    daytime volume, normal daily volume, and whether the match hours stand out.
+    Active minutes are not used: every host is 'active' 60 minutes of every
+    hour from background traffic alone, so only volume tells hosts apart."""
+    now = datetime.now(timezone.utc)
+    match_end = _match_end(identity) or now
+    end = min(match_end + timedelta(days=1), now)
+    start = end - timedelta(days=14)
+    frame = db.fetch_host_load_1h(host, start, end)
+    result = {"period": f"{start:%Y-%m-%d} to {end:%Y-%m-%d}", "sources": "subscriber_ip_load_enriched_1h"}
+    if frame.empty:
+        return result
+    stamps = pd.to_datetime(frame["time"])
+    stamps = stamps.dt.tz_localize("UTC") if stamps.dt.tz is None else stamps
+    local_hour = stamps.dt.tz_convert(config.LOCAL_TIMEZONE).dt.hour
+    frame = frame.assign(day=stamps.dt.date, total=frame["up_bytes"] + frame["down_bytes"])
+    night = frame.loc[local_hour < NIGHT_END_HOUR, "total"]
+    day = frame.loc[(local_hour >= DAY_START_HOUR) & (local_hour < DAY_END_HOUR), "total"]
+    if not night.empty and not day.empty:
+        result["night_bytes_per_hour"] = int(night.median())
+        result["day_bytes_per_hour"] = int(day.median())
+        result["night_day_ratio"] = round(float(night.median()) / max(float(day.median()), 1.0), 2)
+    daily = frame.groupby("day")[["up_bytes", "down_bytes"]].sum()
+    result["median_daily_up"] = int(daily["up_bytes"].median())
+    result["median_daily_down"] = int(daily["down_bytes"].median())
+    first = _match_start(identity)
+    if first:
+        in_match = frame[(pd.to_datetime(frame["time"], utc=True) >= first.replace(minute=0, second=0, microsecond=0))
+                         & (pd.to_datetime(frame["time"], utc=True) <= match_end)]
+        typical = float(frame["total"].median())
+        if not in_match.empty and typical > 0:
+            result["match_hours_vs_typical"] = round(float(in_match["total"].median()) / typical, 2)
+    return result
+
+
+def _match_start(identity: dict | None) -> datetime | None:
+    value = (identity or {}).get("evidence_first_seen")
+    return datetime.fromisoformat(value) if value else None
+
+
 # --- step 7 --------------------------------------------------------------------
 
 def host_other_traffic(host: str, window: CaseWindow, exclude_ips: list[str] | None = None,
-                       own_name: str | None = None, indicator_longest_sec: float | None = None) -> dict:
+                       own_name: str | None = None, indicator_longest_sec: float | None = None,
+                       load: dict | None = None) -> dict:
     """The host's top destinations, long-lived flows to other IPs, any
     destinations matching a known service profile, and uptime evidence."""
     exclude_ips = exclude_ips or []
     activity = db.fetch_host_activity(host, exclude_ips, window.activity_start, window.activity_end, own_name)
     long_flows = db.fetch_host_long_lived_flows(host, exclude_ips, window.flow_start, window.flow_end)
-    baseline = pd.DataFrame()
-    if window.activity_start is not None:
-        baseline = db.fetch_host_baseline(host, window.activity_start, window.activity_end)
     longest = indicator_longest_sec
     if "max_duration_sec" in long_flows and not long_flows.empty:
         longest = max(longest or 0.0, float(long_flows["max_duration_sec"].max()))
     return {"window": window.describe(), **analysis.summarise_other_traffic(activity, long_flows),
-            "uptime": host_uptime(longest, baseline)}
+            "uptime": host_uptime(longest, load)}
 
 
-ALWAYS_ON_CONNECTION_SEC = 86400   # a connection held a day or more
-ALWAYS_ON_ACTIVE_HOURS = 20        # or active in this many hours of a typical day
-PART_TIME_ACTIVE_HOURS = 14        # active this few hours a day, with no day-long connection
+# Local hours for the night/day comparison.
+NIGHT_END_HOUR = 6        # night = 00:00-06:00 local
+DAY_START_HOUR = 9        # day = 09:00-21:00 local
+DAY_END_HOUR = 21
+# Night volume as a share of daytime volume. Measured on real hosts: a
+# self-hosted server ran at 0.76, ordinary machines with background traffic
+# at 0.20-0.36, a personal device that sleeps at 0.00.
+BUSY_AT_NIGHT_RATIO = 0.5    # at or above: busy around the clock (server-like) ...
+BUSY_NIGHT_MIN_BYTES = 50_000_000  # ... but only with real volume at night (50 MB an hour): an idle
+                                   # host's trickle can be just as steady night and day
+QUIET_AT_NIGHT_RATIO = 0.1   # at or below: used in waking hours only
 
 
-def host_uptime(longest_connection_sec: float | None, baseline: pd.DataFrame) -> dict:
-    """Is the host on around the clock? Evidence for "server or laptop",
-    so the host's role rests on data, not on its name."""
-    median_hours = None
-    days = 0
-    if not baseline.empty:
-        hours_per_day = baseline.groupby("day")["hours"].agg(lambda hs: len({int(h) for arr in hs for h in arr}))
-        median_hours = float(hours_per_day.median())
-        days = int(len(hours_per_day))
+def host_uptime(longest_connection_sec: float | None, load: dict | None) -> dict:
+    """Is the host busy around the clock? Based on night vs daytime VOLUME
+    (subscriber_ip_load_enriched_1h), because every connected host shows some
+    traffic every hour. always_on: True = busy around the clock (server-like),
+    False = used in waking hours, None = connected all the time but much
+    quieter at night (background traffic, which says nothing about its role)."""
+    load = load or {}
+    ratio = load.get("night_day_ratio")
     always_on = None
-    if (longest_connection_sec or 0) >= ALWAYS_ON_CONNECTION_SEC or (median_hours or 0) >= ALWAYS_ON_ACTIVE_HOURS:
+    night = load.get("night_bytes_per_hour") or 0
+    if ratio is not None and ratio >= BUSY_AT_NIGHT_RATIO and night >= BUSY_NIGHT_MIN_BYTES:
         always_on = True
-    elif median_hours is not None and median_hours <= PART_TIME_ACTIVE_HOURS:
+    elif ratio is not None and ratio <= QUIET_AT_NIGHT_RATIO:
         always_on = False
-    return {"longest_connection_sec": longest_connection_sec, "median_active_hours": median_hours,
-            "days": days, "always_on": always_on}
+    return {"longest_connection_sec": longest_connection_sec, "night_day_ratio": ratio,
+            "night_bytes_per_hour": load.get("night_bytes_per_hour"),
+            "day_bytes_per_hour": load.get("day_bytes_per_hour"), "always_on": always_on}
 
 
 # --- step 8 --------------------------------------------------------------------

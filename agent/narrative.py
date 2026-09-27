@@ -178,6 +178,10 @@ def _names_source(ev: dict) -> str:
     source = ev.get("names", {}).get("source")
     if source == "feed":
         return "from the IOC feed's own records, as the live per-minute data has expired"
+    if source == "long_flows":
+        return "from long_flow_summary, flows over 1 MB, as the per-minute data has expired"
+    if source == "long_flows+feed":
+        return "from long_flow_summary and the IOC feed's own records, as the per-minute data has expired"
     return "SNI/DNS in subscriber_activity_1m"
 
 
@@ -236,11 +240,14 @@ def _finding(ev: dict, category: str) -> str:
         return (f"The flow data shows connections to {_service_short(service)} on {_ports_text(other)}, which are "
                 "not the client's own ports: that is how something hosted behind the service, such as a C2 "
                 "server behind a tunnel, would be reached.")
-    if category == "beaconing":
-        checkins = flows.get("classification", {}).get("short_flows", {}).get("checkin_analysis") or {}
-        return (f"The flow data shows {checkins.get('count', 'many')} short connections at a regular interval of "
-                f"about {fmt_duration(checkins.get('median_interval_sec', 0))}, the pattern of an infected host "
-                "checking in.")
+    if category in ("beaconing", "periodic_explained"):
+        f = (ev.get("contact") or {}).get("features", {})
+        text = (f"The per-minute data shows {f.get('bursts', 'many')} small contacts at a regular interval of about "
+                f"{fmt_duration((f.get('median_gap_min') or 0) * 60)}, day and night")
+        if category == "beaconing":
+            return text + ", the pattern of an infected host checking in, with no app or service to explain it."
+        reason = _signal(ev, "contact_pattern").get("explained_by", "a recognised app")
+        return text + f", explained by {reason}."
     if category == "persistent_connection":
         return (f"The flow data shows long-lived connections on {_ports_text(ports)}, which is not a service the "
                 "knowledge base recognises.")
@@ -356,14 +363,11 @@ def _flow_sentences(ev: dict) -> list[str]:
             s += (f", and it reconnected within about {held['median_quick_reconnect_sec']:.0f} s of each drop, "
                   "which suggests something relaunches it automatically")
         out.append(s + ".")
-    checkins = (c.get("short_flows") or {}).get("checkin_analysis")
-    if c.get("beacon_like") and checkins:
-        out.append(f"It made {checkins['count']} short connections about every "
-                   f"{fmt_duration(checkins['median_interval_sec'])} (regularity {checkins['regularity_score']:.0f}/100).")
-    elif not held and flows.get("long_flow_count"):
+    if not held and flows.get("long_flow_count"):
         up = sum(p["up_bytes"] for p in flows.get("ports", []))
         down = sum(p["down_bytes"] for p in flows.get("ports", []))
-        out.append(f"It made {_plural(flows['long_flow_count'], 'long flow')} on {_ports_text(ports)}, sending "
+        flow_ports = sorted({(p["port"], p["protocol"]) for p in flows.get("ports", [])})
+        out.append(f"It made {_plural(flows['long_flow_count'], 'flow')} over 1 MB on {_ports_text(flow_ports)}, sending "
                    f"{fmt_bytes(up)} and receiving {fmt_bytes(down)} in total.")
     heavy = flows.get("notable", {}).get("upload_heavy_total")
     if heavy and (held or flows.get("long_flow_count")):
@@ -411,9 +415,10 @@ def _observed(ev: dict) -> str:
         kind = "web traffic" + (" to a named website" if _visible_names(ev) else "")
     else:
         kind = f"traffic on {_ports_text(ports) or 'unknown ports'}"
-    if c.get("beacon_like"):
-        shape = "sent as repeated short check-ins at a regular interval"
-    elif c.get("held_open"):
+    pattern = (ev.get("contact") or {}).get("pattern")
+    if pattern == "periodic_checkin":
+        shape = "sent as repeated small check-ins at a regular interval"
+    elif c.get("held_open") or pattern == "held_open":
         shape = "held open for hours or days"
     elif flows.get("long_flow_count", 0) > 3:
         shape = f"in {flows['long_flow_count']} separate sessions"
@@ -485,14 +490,38 @@ PART_TIME_WORDS = ("laptop", "phone", "mobile", "tablet", "personal device", "ha
 
 
 def role_contradicts_uptime(role: str, uptime: dict) -> bool:
-    """A part-time device for a host that is on around the clock, or a
-    server for one that is only on part of the day."""
+    """A part-time device for a host that is busy around the clock, or a
+    server for one without that evidence (background traffic at night is
+    not evidence of a server)."""
     text = role.lower()
     if uptime.get("always_on") is True:
         return any(word in text for word in PART_TIME_WORDS)
-    if uptime.get("always_on") is False:
-        return "server" in text
-    return False
+    return "server" in text
+
+
+# Role words and the evidence each needs: (words, activity hints, app categories).
+ROLE_EVIDENCE = (
+    (("gaming", "game"), ("gaming",), ("Gameplay", "Gaming Download")),
+    (("develop",), ("software development",), ()),
+    (("media", "stream"), ("self-hosted media", "streaming and social media"), ("Video", "Music", "Live Video")),
+    (("home lab", "homelab", "self-host"), ("home lab or self-hosted services",), ()),
+)
+# Roles no evidence in this data can support.
+UNSUPPORTED_ROLE_WORDS = ("research", "experiment", "iot", "camera", "printer", "smart tv", "kiosk")
+
+
+def role_unsupported(role: str, ev: dict) -> bool:
+    """True if the model's role names something the evidence does not show:
+    each role word needs matching activity hints or app categories, so the
+    agent only states a role the data supports."""
+    text = role.lower()
+    other = ev.get("other_traffic", {}) or {}
+    hints = set((other.get("activity_hints") or {}).keys())
+    categories = {c["category"] for c in (ev.get("host_apps") or {}).get("categories", [])}
+    for words, needed_hints, needed_categories in ROLE_EVIDENCE:
+        if any(w in text for w in words) and not (hints & set(needed_hints) or categories & set(needed_categories)):
+            return True
+    return any(w in text for w in UNSUPPORTED_ROLE_WORDS)
 
 
 # Where-is-it words: the data never says which network a host is on, so the
@@ -509,19 +538,21 @@ def role_guesses_location(role: str, hostname: str | None) -> bool:
 
 
 def _uptime_sentence(ev: dict) -> str:
+    """Night vs daytime volume (subscriber_ip_load_enriched_1h). Every host
+    has some traffic every hour, so only volume says anything."""
     uptime = ev.get("other_traffic", {}).get("uptime") or {}
-    facts = []
-    if uptime.get("longest_connection_sec"):
-        facts.append(f"it held a single connection open for up to {fmt_duration(uptime['longest_connection_sec'])}")
-    if uptime.get("median_active_hours") is not None:
-        facts.append(f"was active in a median {uptime['median_active_hours']:.0f} of 24 hours a day")
-    if not facts:
+    ratio = uptime.get("night_day_ratio")
+    if ratio is None:
         return ""
+    night = f"{fmt_bytes(uptime['night_bytes_per_hour'])} an hour at night against {fmt_bytes(uptime['day_bytes_per_hour'])} by day"
     if uptime.get("always_on") is True:
-        return f"The host is on around the clock: {_join(facts)}, which points to an always-on machine such as a server."
+        shared = len((ev.get("host_apps") or {}).get("user_agent_platforms") or {}) > 1
+        what = "an always-on machine such as a server" + (", or several devices sharing this address" if shared else "")
+        return f"The host stays busy around the clock ({night}), which points to {what}."
     if uptime.get("always_on") is False:
-        return f"The host is only on part of the day: {_join(facts)}, more like a personal device than a server."
-    return f"On uptime, {_join(facts)}."
+        return f"The host goes almost silent at night ({night}), like a personal device used in waking hours."
+    return (f"The host is always connected, with little traffic at night ({night}): background traffic, which "
+            "any connected device has, so it says nothing about what the machine is.")
 
 
 def _agent_reading(result: dict, ev: dict) -> str:
@@ -532,7 +563,7 @@ def _agent_reading(result: dict, ev: dict) -> str:
     uptime = ev.get("other_traffic", {}).get("uptime") or {}
     hostname = (ev.get("host") or {}).get("hostname")
     if (not role or result.get("unverified_numbers") or role_contradicts_uptime(role, uptime)
-            or role_guesses_location(role, hostname)):
+            or role_guesses_location(role, hostname) or role_unsupported(role, ev)):
         return ""
     first = role.split(". ")[0].rstrip(".")
     return f"The agent's reading of the host name and traffic, unconfirmed: {_lower_first(first)}."
@@ -566,7 +597,7 @@ def _join_sentences(*parts: str) -> str:
 
 def _shared_reason(ev: dict) -> str:
     """Why the address counts as shared, in the words of what triggered it."""
-    pdns = next((p for p in ev.get("passive_dns", []) if "error" not in p), None)
+    pdns = next((p for p in ev.get("names_on_ip", []) if "error" not in p), None)
     if pdns and pdns["distinct_root_domains"] >= config.SHARED_PASSIVE_DNS_DOMAINS:
         return "so the address is shared by many unrelated sites"
     service = ev.get("expected", {}).get("service")
@@ -592,7 +623,7 @@ def _peers_sentence(ev: dict) -> str:
         if p["peer_hosts_also_flagged"]:
             text += f", {p['peer_hosts_also_flagged']} of them flagged by other indicators"
         parts.append(text)
-    pdns = next((p for p in ev.get("passive_dns", []) if "error" not in p), None)
+    pdns = next((p for p in ev.get("names_on_ip", []) if "error" not in p), None)
     if pdns and pdns["distinct_root_domains"]:
         when = "recently" if pdns["period_is_current"] else "around the match"
         if pdns["distinct_root_domains"] == 1:
@@ -609,13 +640,99 @@ def _peers_sentence(ev: dict) -> str:
     return _sentence("; ".join(parts) + tail)
 
 
+def contact_paragraph(ev: dict) -> str:
+    """Short 'Contact pattern' paragraph from the per-minute data (beacon.py)."""
+    contact = ev.get("contact") or {}
+    if not contact or "error" in contact:
+        return ""
+    f = contact.get("features", {})
+    table = contact.get("source", "")
+    if contact.get("pattern") == "insufficient_data":
+        return ("Contact pattern: no per-minute contact with the flagged IP was found in "
+                f"{table or 'the per-minute tables'} for the window, so no beacon check is possible "
+                "(long_flow_summary only holds flows over 1 MB and cannot show one).")
+    where = ("the IOC feed's own per-minute records, as the live per-minute data has expired" if table == "IOC feed"
+             else f"{table}, {contact.get('resolution_min', 1)}-minute resolution")
+    parts = [f"Contact pattern ({where}): "
+             f"{contact['description'].lower()}. There {'was' if f['bursts'] == 1 else 'were'} "
+             f"{_plural(f['bursts'], 'burst')} of contact from {_fmt_day(_day(f['first']), False)} to "
+             f"{_fmt_day(_day(f['last']))}"]
+    if f.get("median_gap_min"):
+        parts[0] += f", typically {fmt_duration(f['median_gap_min'] * 60)} apart"
+    parts[0] += f", with {f['night_share']:.0%} of the contact between midnight and 6 am local time."
+    signal = _signal(ev, "contact_pattern")
+    if signal.get("explained_by"):
+        parts.append(f"It is explained by {signal['explained_by']}.")
+    elif signal.get("direction") == signals.SUPPORTS:
+        parts.append("Nothing explains it: no recognised app or session, not a popular destination, and not a known "
+                     "service's normal client.")
+    return " ".join(parts)
+
+
+def apps_line(ev: dict) -> str:
+    app = ev.get("app_context") or {}
+    host_apps = ev.get("host_apps") or {}
+    if "error" in app and "error" in host_apps:
+        return ""
+    seen: list[str] = []
+    for a in app.get("host_apps", []):
+        if a["class"] in ("benign", "vendor", "remote_access") and a["application"] not in seen:
+            seen.append(a["application"])
+    labels = _join(seen)
+    parts = [f"SuperNetFlow labels this traffic as {labels}" if labels
+             else "SuperNetFlow has no app label for this traffic"]
+    if app.get("host_sessions"):
+        top = app["host_sessions"][0]
+        parts.append(f"it was part of recognised {top['type']} sessions ({top['provider']})")
+    agents = host_apps.get("user_agent_platforms") or {}
+    if len(agents) == 1:
+        parts.append(f"the host's user agents point to {next(iter(agents))}")
+    elif agents:
+        parts.append(f"the host's user agents are mixed, mostly {max(agents, key=agents.get)} (several devices "
+                     "may share this address)")
+    if host_apps.get("remote_access_apps"):
+        parts.append(f"it also uses remote-access apps ({_join(host_apps['remote_access_apps'][:3])})")
+    if host_apps.get("privacy_vpn_apps"):
+        parts.append(f"it uses VPNs or privacy relays ({_join(host_apps['privacy_vpn_apps'][:3])})")
+    return "Apps and platform: " + "; ".join(parts) + " (app_subscriber_server_enriched_5m, ux_sessions, subscriber_activity_1m)."
+
+
+def dns_line(ev: dict) -> str:
+    """DNS behaviour, from dns_tuple. Only unusual resolvers or a high
+    unanswered share are notable: most hosts seen there only use the big
+    public resolvers."""
+    dns = ev.get("dns") or {}
+    if "error" in dns:
+        return ""
+    caveat = ("On this deployment dns_tuple has no NXDOMAIN, SERVFAIL or REFUSED counts (unlike the public docs; its "
+              "rcode is always -1), so a domain-generation pattern cannot be checked.")
+    if not dns.get("present"):
+        return ("DNS behaviour: no direct external DNS from this host was seen; it uses the campus resolvers, whose "
+                f"traffic the sensor does not capture (dns_tuple). {caveat}")
+    if not dns.get("rare_resolvers") and not dns.get("unanswered_high"):
+        public = sorted({r["public_resolver"] for r in dns.get("resolvers", []) if r["public_resolver"]})
+        common = f", as {dns['campus_public_only_share']:.0%} of hosts seen there do" if dns.get(
+            "campus_public_only_share") is not None else ""
+        return (f"DNS behaviour: nothing unusual; the little DNS it sends outside campus goes to public resolvers "
+                f"({_join(public) or 'common ones'}){common} (dns_tuple). {caveat}")
+    parts = []
+    if dns.get("rare_resolvers"):
+        parts.append(f"it asks {_join(dns['rare_resolvers'][:2])}, a DNS server few campus hosts use")
+    if dns.get("unanswered_high"):
+        median = dns.get("campus_median_unanswered_ratio")
+        parts.append(f"{dns['unanswered_ratio']:.0%} of its DNS queries went unanswered"
+                     + (f" (campus median {median:.0%})" if median is not None else ""))
+    return f"DNS behaviour: {'; '.join(parts)} (dns_tuple), a weak hint on its own. {caveat}"
+
+
 def analysis(result: dict, ev: dict, category: str) -> str:
     if category == "no_traffic":
         checked = "; ".join(ev.get("flows", {}).get("checked", [])) or "the flow tables and the feed's records"
         return _sentence(f"Checked: {checked}") + " " + _peers_sentence(ev)
     parts = [_names_sentence(ev), *_flow_sentences(ev), *_comparison_sentences(ev),
              _other_traffic_sentence(ev, result), _peers_sentence(ev)]
-    return " ".join(p for p in parts if p)
+    extra = [contact_paragraph(ev), apps_line(ev), dns_line(ev)]
+    return "\n\n".join([" ".join(p for p in parts if p)] + [e for e in extra if e])
 
 
 # --- conclusion ---------------------------------------------------------------------
@@ -666,7 +783,7 @@ def _limits(ev: dict, category: str) -> str:
     if ev.get("names", {}).get("ech_hidden_minutes") and not _visible_names(ev):
         limits.append("the site name was hidden by Encrypted Client Hello")
     if not ev.get("flows", {}).get("long_flow_count"):
-        limits.append("short connections are missing from long_flow_summary")
+        limits.append("long_flow_summary only holds flows over 1 MB, so small or short connections are not in it")
     cut = ev.get("flows", {}).get("retention_cut")
     if cut:
         limits.append(f"long_flow_summary only keeps flows that ended on or after {_fmt_day(_day(cut))}, and this "
