@@ -75,6 +75,8 @@ def _call_ollama(messages: list[dict], tools: list[dict] | None, model: str | No
     }
     if tools:
         payload["tools"] = tools
+    if config.OLLAMA_THINK is not None:
+        payload["think"] = config.OLLAMA_THINK  # hidden reasoning, if any, comes back in message.thinking
     headers = {}
     if config.OLLAMA_API_KEY:
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
@@ -196,6 +198,12 @@ def _call_with_retry(messages: list[dict], tools: list[dict] | None, model: str 
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF_SEC * attempt)
     raise RuntimeError(f"{config.PROVIDER} request failed after {MAX_RETRIES} attempts: {last_error}")
+
+
+def chat(messages: list[dict], max_tokens: int | None = None) -> str:
+    """One plain reply (no tools), e.g. for the self-check pass."""
+    message = _call_with_retry(messages, None, None, None, max_tokens or config.MAX_TOKENS)
+    return message.get("content") or ""
 
 
 def run_agent(messages: list[dict], tools: list[dict] | None = None,

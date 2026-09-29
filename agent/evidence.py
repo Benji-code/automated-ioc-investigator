@@ -25,11 +25,45 @@ from pathlib import Path
 from . import config
 
 
+JSON_LINES_SUFFIXES = (".jsonl", ".ndjson")
+
+
+def _parse_json_lines(text: str, path: Path) -> list[dict]:
+    """One JSON object per line; blank lines are skipped."""
+    records = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"{path}, line {number}: not valid JSON ({exc.msg})") from None
+        if not isinstance(record, dict):
+            raise SystemExit(f"{path}, line {number}: expected one JSON object per line")
+        records.append(record)
+    return records
+
+
+def read_records(path: Path) -> list[dict]:
+    """Match records from a JSON list, a single JSON object, or JSON Lines
+    (.jsonl/.ndjson, or a .json file that holds one object per line)."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in JSON_LINES_SUFFIXES:
+        return _parse_json_lines(text, path)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return _parse_json_lines(text, path)
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return data
+    raise SystemExit(f"{path} does not contain match records (a JSON list, or one JSON object per line)")
+
+
 def load_matches(path: Path) -> list[dict]:
-    with path.open(encoding="utf-8") as f:
-        matches = json.load(f)
-    if not isinstance(matches, list):
-        raise SystemExit(f"{path} does not contain a JSON list of match records")
+    matches = read_records(path)
     field = config.FEED_ASSET_FIELD
     for m in matches:
         if field != "affected_asset" and field in m:

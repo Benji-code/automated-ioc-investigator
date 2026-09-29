@@ -302,8 +302,9 @@ RETENTION_EDGE_DAYS = 3  # evidence this close to the table's oldest data may ha
 def retention_cut(window: CaseWindow, flows_result: dict, earliest: datetime | None = None) -> str | None:
     """The date long_flow_summary's data now starts, if that cuts into this
     case: the window reaches back before it and the host's earliest flow
-    sits at that edge (or there are no flows at all). Raising the lookback
-    cannot recover this; the flows are gone from the table."""
+    sits at that edge. With no flows there is nothing at the edge, so no
+    claim is made. Raising the lookback cannot recover this; the flows are
+    gone from the table."""
     if earliest is None:
         try:
             earliest = db.fetch_long_flow_retention_start()
@@ -315,10 +316,11 @@ def retention_cut(window: CaseWindow, flows_result: dict, earliest: datetime | N
     if window.flow_start >= earliest:
         return None
     periods = flows_result.get("active_periods") or []
-    if periods:
-        first = datetime.fromisoformat(periods[0]["start"]).replace(tzinfo=timezone.utc)
-        if (first - earliest).days > RETENTION_EDGE_DAYS:
-            return None
+    if not periods:
+        return None
+    first = datetime.fromisoformat(periods[0]["start"]).replace(tzinfo=timezone.utc)
+    if (first - earliest).days > RETENTION_EDGE_DAYS:
+        return None
     return f"{earliest:%Y-%m-%d}"
 
 
@@ -581,6 +583,27 @@ def domain_features(names: list[str], window: CaseWindow, feed_indicators: set[s
     return results
 
 
+def linked_domain_checks(domains: list[str], identities: list[dict]) -> dict[str, dict]:
+    """Campus checks for domains linked across cases (correlation.py): how
+    many campus hosts used each, around the latest linked match if it is
+    within retention (else the most recent days), and when it was first seen
+    on campus within retention."""
+    if not domains:
+        return {}
+    latest = max(identities, key=lambda i: i.get("evidence_last_seen") or "")
+    window = evidence.case_window(latest)
+    now = datetime.now(timezone.utc)
+    start, end, is_current = _campus_period(window, now, _match_end(latest))
+    hosts = db.fetch_domain_popularity(domains, start, end)
+    first = db.fetch_domain_first_seen(domains, now - timedelta(days=config.ACTIVITY_RETENTION_DAYS), now)
+    host_counts = {str(r.root_domain): int(r.hosts) for r in hosts.itertuples(index=False)} if not hosts.empty else {}
+    first_seen = ({str(r.root_domain): analysis.fmt_time(r.first_time) for r in first.itertuples(index=False)}
+                  if not first.empty else {})
+    period = f"{start:%Y-%m-%d} to {end:%Y-%m-%d}"
+    return {d: {"campus_hosts": host_counts.get(d, 0), "campus_period": period, "campus_period_is_current": is_current,
+                "campus_first_seen": first_seen.get(d)} for d in domains}
+
+
 def _is_new(first_seen: str | None, retention_start: datetime) -> bool | None:
     """True if the domain first appeared more than 2 days into retention
     (it was not already there at the start)."""
@@ -826,9 +849,18 @@ def host_dns_behaviour(host: str, identity: dict) -> dict:
     for row in frame.itertuples(index=False):
         public = row.server_ip in knowledge.PUBLIC_RESOLVERS
         count = int(client_counts.get(row.server_ip, 0))
-        resolvers.append({"server_ip": row.server_ip, "answered": int(row.answered), "unanswered": int(row.unanswered),
-                          "campus_clients": count, "public_resolver": knowledge.PUBLIC_RESOLVERS.get(row.server_ip),
-                          "rare": (not public) and count <= RARE_RESOLVER_MAX_CLIENTS})
+        entry = {"server_ip": row.server_ip, "answered": int(row.answered), "unanswered": int(row.unanswered),
+                 "campus_clients": count, "public_resolver": knowledge.PUBLIC_RESOLVERS.get(row.server_ip),
+                 "rare": (not public) and count <= RARE_RESOLVER_MAX_CLIENTS,
+                 "authoritative": knowledge.authoritative_dns(row.server_ip)}
+        if entry["rare"]:  # name who runs an unusual DNS server rather than just "a server few hosts use"
+            try:
+                asn = db.fetch_asn(row.server_ip)
+            except Exception:  # noqa: BLE001 - the ASN only improves the wording
+                asn = None
+            entry["asn"] = asn["asn"] if asn else ""
+            entry["asn_org"] = asn["asn_org"] if asn else ""
+        resolvers.append(entry)
     try:
         public_share = db.fetch_dns_public_only_share(list(knowledge.PUBLIC_RESOLVERS), baseline_start, end)
     except Exception:  # noqa: BLE001 - only used for wording
@@ -843,6 +875,7 @@ def host_dns_behaviour(host: str, identity: dict) -> dict:
                 round(campus_median, 3) if campus_median is not None else None,
             "unanswered_high": bool(high),
             "rare_resolvers": [r["server_ip"] for r in resolvers if r["rare"]],
+            "rare_resolver_details": [r for r in resolvers if r["rare"]],
             "campus_public_only_share": round(public_share, 2) if public_share is not None else None,
             "sources": "dns_tuple (no names or response codes here)"}
 

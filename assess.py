@@ -2,13 +2,16 @@
 
 For each (indicator, internal host) pair in the feed, the must-run checks
 (steps 1-5, 7, 8) run deterministically in Python against ClickHouse and the
-local knowledge base, and Python computes evidence signals and a baseline
-verdict. The model then reads the case file, may call follow-up tools, and
-gives a verdict (steps 6, 9); code checks the reply against the evidence and
-the baseline. Python writes the reports (step 10).
+local knowledge base, and Python computes evidence signals and a rule-based
+verdict. The model then reviews the evidence BLIND (without the rules'
+signals or verdict), may call follow-up tools, and gives its own verdict
+(steps 6, 9). The rules' verdict stands; where the blind review disagrees,
+or its reasoning contradicts the evidence, the case goes to a human. Python
+writes the reports (step 10).
 
-    python assess.py --input data/sample/ioc_matches_sample.json
-    python assess.py --input data/ioc_matches.json --indicator bore.pub
+    python assess.py                                   # the default feed in data/
+    python assess.py data/ioc_matches.jsonl --limit 5  # a feed given by name (JSON or JSON Lines)
+    python assess.py data/sample/ioc_matches_sample.json --indicator bore.pub
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import time
 from functools import partial
 from pathlib import Path
 
-from agent import behaviour, casefile, config, db, evidence, llm_client, narrative, report, signals, tools
+from agent import behaviour, casefile, config, correlation, db, evidence, llm_client, narrative, report, signals, tools
 
 HERE = Path(__file__).resolve().parent
 # Local Ollama has no rate limit; OpenRouter's free tier does.
@@ -55,9 +58,12 @@ base (threat type, malware family, and any known service such as a tunnel), \
 the flows between the host and the flagged IP, the names the host actually \
 used on that IP, the other names on that IP campus-wide, domain features, the \
 host's traffic to other IPs, and other {config.HOST_LABEL}s contacting the flagged IP. \
-It ends with EVIDENCE SIGNALS computed in code and a BASELINE VERDICT from \
-fixed rules. Use only the case file and tool results. Do not invent numbers, \
-hostnames or events. You have no internet access.
+You are the independent reviewer: a separate rule-based check has already \
+reached a verdict that you are NOT shown. Judge the evidence yourself. Your \
+verdict is compared with it and any disagreement goes to a human analyst, so \
+give your own honest reading, not the answer you expect. Use only the case \
+file and tool results. Do not invent numbers, hostnames or events. You have \
+no internet access.
 
 How to read the evidence:
 - CONTACT PATTERN comes from per-minute data (subscriber_activity_1m, or the \
@@ -94,10 +100,6 @@ match. Key points:
 - ThreatFox confidence says how sure the reporter is that the INDICATOR is \
 malicious. It says nothing about whether THIS HOST is infected. Never use it \
 to move a verdict to SUSPICIOUS or LIKELY_THREAT.
-- Start from the BASELINE VERDICT. You may disagree, but only by naming the \
-signal you override in BASELINE_OVERRIDE and saying what evidence contradicts \
-it. Otherwise give the baseline verdict. A verdict that differs from the \
-baseline without a named override is replaced by the baseline.
 - An ip:443 indicator on a CDN or shared cloud IP (Cloudflare, AWS) is weak on \
 its own: one IP serves thousands of unrelated sites. What matters is which \
 name the host actually used on it (the "names" section) and whether that name \
@@ -123,6 +125,11 @@ ThreatFox's dates. Only reason about ThreatFox dates if the case file gives them
 - A tunnel that exposes a campus host to the internet bypasses the firewall \
 even when its use is benign: a false positive for the malware can still be a \
 risk worth following up.
+- ADDITIONAL_FINDING is your channel for edge cases: something the evidence \
+shows that a routine reading of this kind of case would miss (a port, a timing, \
+a combination across sections, a reason the usual explanation does not apply \
+here). It goes into the report and sends the case to a human, so raise it only \
+when it is specific and backed by a named section; otherwise write "none".
 - If step 5 found no traffic, say so plainly. The verdict is then set to \
 INSUFFICIENT_DATA in code, whatever you write.
 - Evidence marked "from the IOC feed, not re-queried" is the feed's own copy \
@@ -140,7 +147,9 @@ host is or which network it is on (e.g. residential, staff, lab) unless the host
 plainly says so>
 KEY_JUDGEMENT: <2-3 sentences: the deciding evidence for the verdict, and any \
 risk that remains even if it is not malware>
-BASELINE_OVERRIDE: <"none", or the one signal you override then " - " and the evidence, e.g. "protocol_fit - flows are TCP to port 1604">
+ADDITIONAL_FINDING: <"none", or 1-3 sentences on something specific in the evidence \
+that a standard reading of this case would miss or get wrong, naming the case-file \
+section it comes from (e.g. "STEP 5c")>
 VERDICT: <LIKELY_THREAT | SUSPICIOUS | LIKELY_FALSE_POSITIVE>
 CONFIDENCE: <low | medium | high>
 
@@ -150,8 +159,9 @@ does not match the threat (shared infrastructure, a known service's normal \
 client, or a shape that doesn't fit), even if some other risk remains.
 """
 
-FIELDS = ["HOST_ROLE", "KEY_JUDGEMENT", "BASELINE_OVERRIDE", "VERDICT", "CONFIDENCE"]
+FIELDS = ["HOST_ROLE", "KEY_JUDGEMENT", "ADDITIONAL_FINDING", "VERDICT", "CONFIDENCE"]
 VERDICTS = {"LIKELY_THREAT", "SUSPICIOUS", "LIKELY_FALSE_POSITIVE"}  # the model's choices
+ONE_WORD_FIELDS = ("VERDICT", "CONFIDENCE")
 
 
 def parse_reply(text: str) -> dict:
@@ -165,12 +175,13 @@ def parse_reply(text: str) -> dict:
         if matched_field:
             current = matched_field
             parsed[current] = stripped.split(":", 1)[1].strip()
-        elif current:
+        elif current and current not in ONE_WORD_FIELDS:
             parsed[current] = (parsed[current] + " " + line.strip()).strip()
-    parsed["VERDICT"] = parsed["VERDICT"].upper().replace(" ", "_") or "SUSPICIOUS"
-    if parsed["VERDICT"] not in VERDICTS:
-        parsed["VERDICT"] = "SUSPICIOUS"
-    parsed["CONFIDENCE"] = parsed["CONFIDENCE"].lower() or "low"
+    # One-word fields: take the known value, ignoring any stray text after it.
+    verdict = parsed["VERDICT"].upper().replace(" ", "_")
+    parsed["VERDICT"] = next((v for v in sorted(VERDICTS, key=len, reverse=True) if v in verdict), "SUSPICIOUS")
+    confidence = re.search(r"(?i)\b(low|medium|high)\b", parsed["CONFIDENCE"])
+    parsed["CONFIDENCE"] = confidence.group(1).lower() if confidence else "low"
     return parsed
 
 
@@ -274,6 +285,7 @@ def _guard_against_fabricated_traffic_detail(parsed: dict, ev: dict) -> dict:
     parsed = dict(parsed)
     parsed["KEY_JUDGEMENT"] = NO_TRAFFIC_NOTE
     parsed["HOST_ROLE"] = ""
+    parsed["ADDITIONAL_FINDING"] = ""
     parsed["VERDICT"] = "INSUFFICIENT_DATA"
     parsed["CONFIDENCE"] = "high"
     return parsed
@@ -284,50 +296,26 @@ def _guard_against_fabricated_traffic_detail(parsed: dict, ev: dict) -> dict:
 SEVERITY = {"LIKELY_FALSE_POSITIVE": 0, "SUSPICIOUS": 1, "LIKELY_THREAT": 2}
 
 
-def parse_override(text: str) -> tuple[str | None, str]:
-    """(signal name, reason) from BASELINE_OVERRIDE, or (None, '') for none.
-    The line must START with a signal name: a small model sometimes echoes
-    the template ("signal_name - ...") or names signals while agreeing."""
-    text = (text or "").strip().strip("`*").strip()
-    if not text or text.lower().startswith(("none", "n/a", "no ")) or text.lower() == "no":
-        return None, ""
-    first = re.split(r"[\s:,-]+", text, maxsplit=1)[0].strip("`*")
-    if first in signals.SIGNAL_NAMES:
-        return first, text
-    return None, text
-
-
 def reconcile_verdict(parsed: dict, baseline: dict) -> dict:
-    """Keep the model's verdict only if it matches the baseline, or it names
-    the signal it overrides with a reason that is not ThreatFox confidence.
-    Otherwise use the baseline. Any disagreement is marked for review."""
+    """Blind review. The rules' baseline sets the verdict and confidence; the
+    model's own verdict, reached without seeing the baseline, is kept beside
+    it. A disagreement is noted and marks the case for a human (finish_result),
+    with the model's reasoning shown, instead of either side overruling the
+    other."""
     parsed = dict(parsed)
     model_verdict = parsed["VERDICT"]
     parsed["model_verdict"] = model_verdict
-    parsed["baseline_verdict"] = baseline["verdict"]
-    parsed["override_signal"] = None
-    notes: list[str] = []
     parsed["model_confidence"] = parsed["CONFIDENCE"]
-    if baseline["verdict"] == "INSUFFICIENT_DATA" or model_verdict == baseline["verdict"]:
-        # Same verdict: the confidence is the baseline's, which follows fixed
-        # rules, so identical evidence always gets the same confidence.
-        parsed["VERDICT"] = baseline["verdict"]
-        parsed["CONFIDENCE"] = baseline["confidence"]
-        return {**parsed, "verdict_notes": notes}
-
-    signal, reason = parse_override(parsed.get("BASELINE_OVERRIDE", ""))
-    leans_on_confidence = re.search(r"(?i)threatfox|confidence", reason or "")
-    escalating = SEVERITY.get(model_verdict, 1) > SEVERITY.get(baseline["verdict"], 1)
-    if signal and not (escalating and leans_on_confidence):
-        parsed["override_signal"] = signal
-        notes.append(f"Model overrode the baseline ({baseline['verdict']}) on {signal}: {reason}")
-        return {**parsed, "verdict_notes": notes}
-
+    parsed["baseline_verdict"] = baseline["verdict"]
     parsed["VERDICT"] = baseline["verdict"]
     parsed["CONFIDENCE"] = baseline["confidence"]
-    why = ("it rested on ThreatFox confidence, which rates the indicator, not the host"
-           if signal and leans_on_confidence else "no signal was named in BASELINE_OVERRIDE")
-    notes.append(f"Model said {model_verdict} but {why}; baseline {baseline['verdict']} kept.")
+    notes: list[str] = []
+    if baseline["verdict"] != "INSUFFICIENT_DATA" and model_verdict != baseline["verdict"]:
+        notes.append(f"Blind review disagrees: without seeing the rules' result, the agent judged this "
+                     f"{model_verdict}; the rules say {baseline['verdict']}.")
+        escalating = SEVERITY.get(model_verdict, 1) > SEVERITY.get(baseline["verdict"], 1)
+        if escalating and re.search(r"(?i)threatfox|confidence", parsed.get("KEY_JUDGEMENT", "")):
+            notes.append("Its reasoning mentions ThreatFox confidence, which rates the indicator, not this host.")
     return {**parsed, "verdict_notes": notes}
 
 
@@ -362,10 +350,10 @@ def consistency_flags(parsed: dict, ev: dict) -> list[str]:
     """Contradictions between the reply and the evidence (task 2, 1.5)."""
     flags: list[str] = []
     verdict = parsed["VERDICT"]
-    if (verdict in ("SUSPICIOUS", "LIKELY_THREAT") and not parsed.get("override_signal")
-            and _affirmed_mismatch(parsed.get("KEY_JUDGEMENT", ""))):
-        flags.append(f"The agent's judgement says the traffic does not match the threat, but the verdict is "
-                     f"{verdict} with no overriding signal.")
+    model_verdict = parsed.get("model_verdict", verdict)
+    if model_verdict in ("SUSPICIOUS", "LIKELY_THREAT") and _affirmed_mismatch(parsed.get("KEY_JUDGEMENT", "")):
+        flags.append(f"The agent's judgement says the traffic does not match the threat, but it still judged "
+                     f"it {model_verdict}.")
 
     text = " ".join(parsed.get(f, "") for f in REPLY_TEXT_FIELDS)
     exfil = ev.get("flows", {}).get("upload_heavy_over_exfil_threshold", {"count": 0})
@@ -405,26 +393,69 @@ def unverified_numbers(parsed: dict, evidence_text: str) -> list[str]:
 
 # --- one case -----------------------------------------------------------------------
 
-def assess_case(identity: dict, case_rows: list[dict], asset_index: dict[str, list[dict]]) -> dict:
+def assess_case(identity: dict, case_rows: list[dict], asset_index: dict[str, list[dict]],
+                links: dict | None = None, link_checks: dict | None = None,
+                also_matched: list[str] | None = None) -> dict:
     ev = gather_evidence(identity, case_rows, asset_index)
+    attach_links(ev, links, link_checks)
+    ev["also_matched"] = also_matched or []
     return assess_evidence(identity, ev)
+
+
+def merge_same_visits(cases: list[tuple[dict, list[dict]]], links: dict) -> tuple[list, dict[tuple, list[str]]]:
+    """Drop duplicate cases (one host, one linked site, two flagged IPs) and
+    return (cases to assess, {primary case: [the other indicators]})."""
+    duplicates = correlation.same_visits(cases, links)
+    also: dict[tuple, list[str]] = {}
+    for duplicate, primary in duplicates.items():
+        also.setdefault(primary, []).append(duplicate[0])
+    keep = [c for c in cases if (c[0]["indicator"], c[0]["affected_asset"]) not in duplicates]
+    return keep, also
+
+
+def attach_links(ev: dict, links: dict | None, link_checks: dict | None) -> None:
+    """Cross-case links for this case: its own names shared with other
+    flagged indicators. The link itself is a report-level note; the case is
+    only marked for review if its own contact with the domain is substantial."""
+    ev["correlation"] = None
+    if not links or not links.get("domains"):
+        return
+    key = (ev["identity"]["indicator"], ev["identity"]["affected_asset"])
+    # Only this case's OWN names count: a case whose site name was hidden
+    # (e.g. by ECH) is not linked on a guess about which site it visited.
+    ev["correlation"] = correlation.for_case(links, key, link_checks)
+
+
+def cross_case_links(cases: list[tuple[dict, list[dict]]]) -> tuple[dict, dict]:
+    """(correlation, domain checks) for the whole feed: domains seen behind
+    two or more flagged indicators, and campus checks on each."""
+    links = correlation.correlate(cases)
+    domains = list(links["domains"])
+    identities = [identity for identity, _ in cases
+                  if (identity["indicator"], identity["affected_asset"]) in links["by_case"]]
+    checks = _safe("linked_domain_checks", tools.linked_domain_checks, domains, identities) if domains else {}
+    if "error" in checks:
+        print(f"  (campus checks on linked domains failed: {checks['error'][:120]})")
+        checks = {}
+    return links, checks
 
 
 def assess_evidence(identity: dict, ev: dict) -> dict:
     """Run the model on already-gathered evidence (eval re-runs this to check
     that identical evidence gives an identical verdict)."""
-    case_file = casefile.build_case_file(ev)
+    case_file = casefile.build_case_file(ev)           # full, for reviewers and the number check
+    blind_file = casefile.build_case_file(ev, blind=True)  # what the model reviews
     ip_list = [entry["server_ip"] for entry in ev["server_ips"].get("ips", [])]
     tool_executor = partial(tools.execute, client_ip=identity["affected_asset"], server_ips=ip_list)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": blind_file}]
     reply_text, tool_trace = llm_client.run_agent(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": case_file},
-        ],
+        messages=messages,
         tools=tools.TOOL_SPECS,
         tool_executor=tool_executor,
     )
+    reply_text, refinement = refine_reply(messages, reply_text, ev, case_file + json.dumps(tool_trace, default=str))
     result = finish_result(identity, ev, case_file, reply_text, tool_trace)
+    result["refinement"] = refinement
     result["prompt_tokens"] = llm_client.max_prompt_tokens
     if config.PROVIDER == "ollama" and llm_client.max_prompt_tokens >= CONTEXT_WARN_SHARE * config.OLLAMA_NUM_CTX:
         result["consistency_flags"].append(
@@ -437,6 +468,111 @@ def assess_evidence(identity: dict, ev: dict) -> dict:
 CONTEXT_WARN_SHARE = 0.95
 
 
+# --- self-check pass ---------------------------------------------------------------
+
+REFINE_PROMPT = """Check your answer before it is final. Go through each point and fix anything wrong:
+1. Every number you wrote appears in the case file or tool results.
+2. Your VERDICT follows from your KEY_JUDGEMENT. If you say the traffic does not fit the threat, the verdict \
+should not be SUSPICIOUS or LIKELY_THREAT unless you name what else is suspicious.
+3. You weighed both explanations: the benign one (shared infrastructure, a known service's normal client, an \
+app label, a popular destination) and the malicious one, and your judgement says which evidence decided it.
+4. You mention any risk that remains even if this is not malware (for example a tunnel or remote-access \
+tool that exposes the host).
+5. HOST_ROLE rests on the Uptime line and the app and domain evidence, not on guesses, and does not guess \
+the host's location or network.
+6. You did not rely on ThreatFox confidence: it rates the indicator, not this host.
+7. ADDITIONAL_FINDING is "none" unless you found something specific that a routine reading would miss; \
+if you raise one, it names the case-file section it comes from and every number in it is in the case file.
+{problems}
+Reply with the complete answer again in exactly the same template. If it already holds up, repeat it unchanged."""
+
+EXPOSURE_WORDS_RE = re.compile(r"(?i)expos|firewall|tunnel|remote|inbound|reach")
+
+
+NO_FINDING_RE = re.compile(r"(?i)^\W*(none|n/?a|no|nothing|no additional finding[s]?)\W*$")
+SECTION_RE = re.compile(r"(?i)\bstep\s*\d|cross-case|contact pattern|apps and platform|dns behaviour|"
+                        r"names (the host|on the)|flows between|other traffic|uptime|other (internal|unsw)? ?hosts")
+
+
+def has_finding(parsed: dict) -> bool:
+    text = (parsed.get("ADDITIONAL_FINDING") or "").strip()
+    return bool(text) and not NO_FINDING_RE.match(text)
+
+
+def finding_problems(text: str, evidence_text: str) -> list[str]:
+    """Why an ADDITIONAL_FINDING cannot go into the report as written."""
+    problems = []
+    numbers = unverified_numbers({"KEY_JUDGEMENT": text}, evidence_text)
+    if numbers:
+        problems.append(f"it quotes numbers not in the case file ({', '.join(numbers)})")
+    if re.search(r"(?i)threatfox|confidence", text):
+        problems.append("it relies on ThreatFox confidence, which rates the indicator, not this host")
+    if not SECTION_RE.search(text):
+        problems.append("it does not name the case-file section it comes from")
+    return problems
+
+
+def self_check_problems(parsed: dict, ev: dict, evidence_text: str) -> list[str]:
+    """Problems code can find in a reply without revealing the rules' verdict
+    (the review must stay blind)."""
+    problems: list[str] = []
+    verdict = parsed.get("VERDICT")
+    judgement = parsed.get("KEY_JUDGEMENT", "")
+    if not judgement.strip():
+        problems.append("KEY_JUDGEMENT is missing: give the deciding evidence.")
+    numbers = unverified_numbers(parsed, evidence_text)
+    if numbers:
+        problems.append(f"These numbers are not in the case file: {', '.join(numbers)}. Correct or remove them.")
+    if verdict in ("SUSPICIOUS", "LIKELY_THREAT") and _affirmed_mismatch(judgement):
+        problems.append(f"Your judgement says the traffic does not match the threat, yet your verdict is {verdict}.")
+    exfil = ev.get("flows", {}).get("upload_heavy_over_exfil_threshold", {"count": 0})
+    if _affirmed(EXFIL_RE, judgement) and not exfil.get("count"):
+        problems.append("You mention exfiltration, but the case file shows no flow over the exfiltration threshold.")
+    shared = next((s for s in ev.get("signals", []) if s["name"] == "shared_infrastructure"), None)
+    if shared and shared["direction"] == signals.AGAINST and NOT_SHARED_RE.search(judgement):
+        problems.append(f"You say the IP is not shared, but the case file shows it is: {shared['reason']}")
+    if verdict in ("SUSPICIOUS", "LIKELY_THREAT") and re.search(r"(?i)threatfox|confidence", judgement):
+        problems.append("Your reasoning cites ThreatFox confidence, which rates the indicator, not this host.")
+    service = ev.get("expected", {}).get("service")
+    remote = (ev.get("app_context") or {}).get("remote_access_app")
+    if (service or remote) and not EXPOSURE_WORDS_RE.search(judgement):
+        name = service["profile"]["name"] if service else remote
+        problems.append(f"The case file shows {name}; say what risk remains from it even if it is not malware.")
+    if has_finding(parsed):
+        for problem in finding_problems(parsed["ADDITIONAL_FINDING"], evidence_text):
+            problems.append(f"Your ADDITIONAL_FINDING cannot go into the report as written: {problem}. Fix it, "
+                            "or write none.")
+    role = parsed.get("HOST_ROLE", "")
+    uptime = ev.get("other_traffic", {}).get("uptime") or {}
+    hostname = (ev.get("host") or {}).get("hostname")
+    if role and (narrative.role_contradicts_uptime(role, uptime) or narrative.role_guesses_location(role, hostname)
+                 or narrative.role_unsupported(role, ev)):
+        problems.append("Your HOST_ROLE is not supported by the evidence: base it on the Uptime line and the "
+                        "app and domain evidence, or say the role is unclear.")
+    return problems
+
+
+def refine_reply(messages: list[dict], reply_text: str, ev: dict, evidence_text: str) -> tuple[str, dict]:
+    """Give the model its reply back with a checklist and any problems code
+    found; keep the corrected reply if it is complete. Returns (final reply,
+    record of what happened)."""
+    record = {"rounds": 0, "problems": [], "first_reply": reply_text, "changed": False}
+    for _ in range(max(config.MODEL_REFINE_ROUNDS, 0)):
+        problems = self_check_problems(parse_reply(reply_text), ev, evidence_text)
+        listed = ("\nProblems found automatically in your answer:\n" + "\n".join(f"- {p}" for p in problems)
+                  if problems else "")
+        revised = llm_client.chat(messages + [{"role": "assistant", "content": reply_text},
+                                              {"role": "user", "content": REFINE_PROMPT.format(problems=listed)}])
+        record["rounds"] += 1
+        record["problems"].extend(problems)
+        if not re.search(r"(?im)^\W*VERDICT\s*:", revised or ""):
+            break  # incomplete rewrite: keep the previous answer
+        record["changed"] = record["changed"] or parse_reply(revised) != parse_reply(reply_text)
+        reply_text = revised
+    record["first_verdict"] = parse_reply(record["first_reply"])["VERDICT"]
+    return reply_text, record
+
+
 def finish_result(identity: dict, ev: dict, case_file: str, reply_text: str, tool_trace: list[dict]) -> dict:
     """Parse the reply and apply every code check (split out for tests)."""
     parsed = parse_reply(reply_text)
@@ -447,7 +583,27 @@ def finish_result(identity: dict, ev: dict, case_file: str, reply_text: str, too
     flags = consistency_flags(parsed, ev)
     if numbers:
         flags.append(f"Numbers not found in the evidence: {', '.join(numbers)}.")
-    review = bool(flags) or parsed["model_verdict"] != parsed["baseline_verdict"]
+    links = ev.get("correlation")
+    substantial = narrative.substantial_contact(ev) if links else None
+    if substantial:
+        domains = ", ".join(d["domain"] for d in links["domains"])
+        parsed["verdict_notes"].append(
+            f"{domains} is behind other flagged indicators in this feed, and this host's own contact with it is "
+            f"more than one visit: {substantial}.")
+        if parsed["CONFIDENCE"] == "high":
+            parsed["CONFIDENCE"] = "medium"  # a possible real indicator with real contact: not a confident clear
+    finding = None
+    if has_finding(parsed) and parsed["VERDICT"] != "INSUFFICIENT_DATA":
+        problems = finding_problems(parsed["ADDITIONAL_FINDING"], evidence_text)
+        if problems:
+            parsed["verdict_notes"].append("The agent raised a finding that was left out of the report because "
+                                           f"{'; '.join(problems)}: \"{parsed['ADDITIONAL_FINDING'][:300]}\"")
+        else:
+            finding = parsed["ADDITIONAL_FINDING"].strip()
+            parsed["verdict_notes"].append("The agent raised a finding the rule-based checks do not cover "
+                                           "(in the report).")
+    review = (bool(flags) or parsed["model_verdict"] != parsed["baseline_verdict"] or bool(substantial)
+              or has_finding(parsed))
     result = {
         **identity,
         "evidence": ev,
@@ -458,6 +614,7 @@ def finish_result(identity: dict, ev: dict, case_file: str, reply_text: str, too
         "unverified_numbers": numbers,
         "consistency_flags": flags,
         "needs_review": review and parsed["VERDICT"] != "INSUFFICIENT_DATA",
+        "additional_finding": finding,
     }
     if "behaviour" not in ev:  # evidence saved before behaviour categories existed
         ev["behaviour"] = behaviour.classify(ev)
@@ -489,9 +646,26 @@ def load_cases(input_path: Path) -> tuple[list[tuple[dict, list[dict]]], dict[st
     return cases, asset_index, len(matches)
 
 
+DEFAULT_FEEDS = (HERE / "data" / "ioc_matches.jsonl", HERE / "data" / "ioc_matches.json")
+
+
+def feed_path(positional: Path | None, option: Path | None) -> Path:
+    """The feed to read: given by name (positional or --input), else the
+    first default feed in data/ that exists."""
+    if positional and option and positional != option:
+        raise SystemExit(f"Two different feeds given: {positional} and --input {option}. Give one.")
+    chosen = positional or option
+    if chosen:
+        return chosen
+    return next((p for p in DEFAULT_FEEDS if p.exists()), DEFAULT_FEEDS[0])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Triage IOC matches with flow data and a local LLM.")
-    parser.add_argument("--input", type=Path, default=HERE / "data" / "ioc_matches.json")
+    parser.add_argument("feed", type=Path, nargs="?", default=None,
+                        help="IOC-match feed: a JSON list or JSON Lines (.jsonl). "
+                             "Default: data/ioc_matches.jsonl, else data/ioc_matches.json")
+    parser.add_argument("--input", type=Path, default=None, help="same as the positional feed argument")
     parser.add_argument("--output-dir", type=Path, default=HERE / "output")
     parser.add_argument("--limit", type=int, default=None, help="only assess the first N new cases")
     parser.add_argument("--indicator", type=str, default=None,
@@ -501,6 +675,7 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true",
                         help="keep cases that already succeeded in the output and only assess the rest")
     args = parser.parse_args()
+    args.input = feed_path(args.feed, args.input)
 
     if not args.input.exists():
         raise SystemExit(f"{args.input} not found")
@@ -508,6 +683,13 @@ def main() -> None:
 
     cases, asset_index, match_count = load_cases(args.input)
     total_cases = len(cases)
+    links, link_checks = cross_case_links(cases)
+    for domain, info in links["domains"].items():
+        print(f"Linked domain: {domain} is behind {len(info['indicators'])} flagged indicators "
+              f"({', '.join(info['indicators'])}); noted in the report.")
+    cases, also_matched = merge_same_visits(cases, links)
+    for primary, others in also_matched.items():
+        print(f"Same visit: {primary[0]} and {', '.join(others)} for {primary[1]} are reported as one case.")
     if args.indicator:
         cases = [c for c in cases if c[0]["indicator"] == args.indicator]
 
@@ -542,11 +724,12 @@ def main() -> None:
     for i, (identity, case_rows) in enumerate(cases):
         print(f"\n[{i + 1}/{len(cases)}] {identity['indicator']} <-> {identity['affected_asset']}")
         try:
-            result = assess_case(identity, case_rows, asset_index)
+            key = (identity["indicator"], identity["affected_asset"])
+            result = assess_case(identity, case_rows, asset_index, links, link_checks, also_matched.get(key))
             tool_note = f", {len(result['tool_calls'])} tool call(s)" if result["tool_calls"] else ""
             review = " [REVIEW]" if result["needs_review"] else ""
-            print(f"  verdict={result['VERDICT']} (baseline {result['baseline_verdict']}, model "
-                  f"{result['model_verdict']}) confidence={result['CONFIDENCE']}{tool_note}{review}")
+            print(f"  verdict={result['VERDICT']} (rules; blind review said {result['model_verdict']}) "
+                  f"confidence={result['CONFIDENCE']}{tool_note}{review}")
             report.write_case_files(result, cases_dir)
         except llm_client.DailyQuotaExceeded as exc:
             print(f"\n{exc}\nStopping after {i} case(s). Run again with --resume after the reset.")

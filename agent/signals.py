@@ -11,8 +11,9 @@ flagged for the same family); "weak" is circumstantial (a rare or new domain,
 a platform hint, a port that fits). ThreatFox confidence is deliberately not
 a signal: it rates the indicator, not this host.
 
-The model sees the signals and the baseline, and may disagree only by naming
-the signal it overrides and why (assess.py enforces that).
+The baseline is the verdict. The model reviews the evidence blind (it never
+sees these signals or the baseline); where its verdict differs, the case is
+marked for a human rather than either side overruling the other.
 """
 from __future__ import annotations
 

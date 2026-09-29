@@ -384,8 +384,8 @@ def uptime_text(uptime: dict) -> str:
     else:
         verdict = {True: "busy around the clock (server-like)",
                    False: "used in waking hours only (a personal device that sleeps at night)",
-                   None: "connected all the time with little traffic at night: background traffic, which says "
-                         "nothing about what the machine is"}[uptime.get("always_on")]
+                   None: "only background traffic at night (or a trickle at every hour), which says nothing "
+                         "about what the machine is"}[uptime.get("always_on")]
     return f"Uptime: {'; '.join(parts) or 'no data'} -> {verdict}. Every host shows some traffic every hour, so only volume counts."
 
 
@@ -528,9 +528,17 @@ def _dns_section(dns: dict) -> str:
     if not dns.get("present"):
         return "\n".join(lines + [f"  {dns.get('note', 'no data')} ({dns.get('period', '')})."])
     for r in dns.get("resolvers", []):
-        kind = f"public: {r['public_resolver']}" if r["public_resolver"] else ("RARE on campus" if r["rare"] else "")
+        tags = []
+        if r["public_resolver"]:
+            tags.append(f"public resolver: {r['public_resolver']}")
+        if r.get("rare"):
+            tags.append("RARE on campus")
+        if r.get("asn"):
+            tags.append(f"AS{r['asn']} {r.get('asn_org', '')}".strip())
+        if r.get("authoritative"):
+            tags.append(f"{r['authoritative']}, NOT a resolver")
         lines.append(f"    - {r['server_ip']}: {r['answered']} answered, {r['unanswered']} unanswered, "
-                     f"{r['campus_clients']} campus client(s) in a day" + (f" [{kind}]" if kind else ""))
+                     f"{r['campus_clients']} campus client(s) in a day" + (f" [{'; '.join(tags)}]" if tags else ""))
     median = dns["campus_median_unanswered_ratio"]
     lines.append(f"  Unanswered share {dns['unanswered_ratio']:.0%} vs campus median "
                  f"{f'{median:.0%}' if median is not None else '?'}"
@@ -562,7 +570,28 @@ def _signals_section(ev: dict) -> str:
 
 BEHAVIOUR CATEGORY (code): {ev.get('behaviour', {}).get('label', '?')}
 BASELINE VERDICT (fixed rules): {baseline['verdict']} (confidence {baseline['confidence']}, rule {baseline['rule']}): {baseline['reason']}
-Give this verdict unless the evidence above contradicts a signal. If so, name that signal in BASELINE_OVERRIDE."""
+(For reviewers: this section is the rules' result and is NOT shown to the model, which reviews the evidence above blind.)"""
+
+
+def _correlation_section(links: dict | None) -> str:
+    """Domains this case shares with other flagged indicators in the feed."""
+    if not links:
+        return ""
+    lines = ["[CROSS-CASE] NAMES SHARED WITH OTHER FLAGGED INDICATORS IN THIS FEED",
+             "  (from the feed's own records: the same domain behind two or more different flagged IPs means the "
+             "domain, not the IP, may be the real indicator)"]
+    for d in links["domains"]:
+        campus = ""
+        if "campus_hosts" in d:
+            when = " (current data)" if d.get("campus_period_is_current") else ""
+            campus = (f"; {d['campus_hosts']} campus host(s) used it over {d['campus_period']}{when}, first seen on "
+                      f"campus {d.get('campus_first_seen') or 'not within retention'}")
+        lines.append(f"    - {d['domain']}: behind {', '.join(d['indicators'])}; {len(d['hosts'])} host(s) in "
+                     f"{d['case_count']} case(s){campus}")
+    for r in links["related_cases"]:
+        same = " - the SAME visit by this host, matched through another flagged IP" if r["same_visit"] else ""
+        lines.append(f"    related case: {r['indicator']} and {r['host']} (via {r['domain']}){same}")
+    return "\n".join(lines) + "\n\n"
 
 
 def _other_matches_section(other_matches: list[dict]) -> str:
@@ -581,9 +610,14 @@ DATA_LIMITATIONS = [
 ]
 
 
-def build_case_file(ev: dict) -> str:
-    """ev is the evidence dict from assess.gather_evidence."""
+def build_case_file(ev: dict, blind: bool = False) -> str:
+    """ev is the evidence dict from assess.gather_evidence. blind=True leaves
+    out the rules' conclusions (signal table, behaviour category, baseline
+    verdict): that is the version the model reviews, so its verdict is an
+    independent check rather than agreement with an answer it was shown.
+    Reviewers get the full version."""
     limitations = "\n".join(f"  - {item}" for item in DATA_LIMITATIONS)
+    conclusions = "" if blind else _signals_section(ev) + "\n\n"
     return f"""CASE FILE
 Steps 1-5, 7 and 8 were gathered automatically just now. Your job: steps 6 and 9.
 ThreatFox confidence rates the indicator, not this host.
@@ -613,13 +647,11 @@ ThreatFox confidence rates the indicator, not this host.
 
 {_names_on_ip_section(ev.get('names_on_ip', []))}
 
-{_other_matches_section(ev['other_matches'])}
+{_correlation_section(ev.get('correlation'))}{_other_matches_section(ev['other_matches'])}
 
 DATA LIMITATIONS (always true for this data):
 {limitations}
 
-{_signals_section(ev)}
-
-If something above doesn't answer what you need, use a follow-up tool. \
+{conclusions}If something above doesn't answer what you need, use a follow-up tool. \
 Otherwise, answer now using the evidence above.
 """

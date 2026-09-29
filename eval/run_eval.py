@@ -73,7 +73,8 @@ def quick_sample(cases, expected: dict, limit: int):
     return picked[:limit]
 
 
-def run_cases(cases, asset_index, repeat: int, save_dir: Path) -> list[dict]:
+def run_cases(cases, asset_index, repeat: int, save_dir: Path, links: dict | None = None,
+              link_checks: dict | None = None, also_matched: dict | None = None) -> list[dict]:
     """Gather evidence once per case, then run the model `repeat` times on it.
     The first run's full results go to save_dir (assessments.json, report.html,
     cases/), rewritten after every case."""
@@ -84,6 +85,8 @@ def run_cases(cases, asset_index, repeat: int, save_dir: Path) -> list[dict]:
         print(f"[{i + 1}/{len(cases)}] {identity['indicator']} <-> {identity['affected_asset']}", flush=True)
         try:
             ev = assess.gather_evidence(identity, rows, asset_index)
+            assess.attach_links(ev, links, link_checks)
+            ev["also_matched"] = (also_matched or {}).get((identity["indicator"], identity["affected_asset"]), [])
             runs = [assess.assess_evidence(identity, ev) for _ in range(repeat)]
         except Exception as exc:  # noqa: BLE001 - one bad case shouldn't stop the eval
             print(f"  FAILED: {exc}")
@@ -102,6 +105,7 @@ def run_cases(cases, asset_index, repeat: int, save_dir: Path) -> list[dict]:
             "baseline": first["baseline_verdict"], "model": first["model_verdict"], "final": first["VERDICT"],
             "stable": len({(r["model_verdict"], r["VERDICT"]) for r in runs}) == 1 if repeat > 1 else None,
             "review": first["needs_review"],
+            "finding": first.get("additional_finding"),
         })
     return results
 
@@ -133,13 +137,16 @@ def from_output(path: Path, rechecked: bool) -> list[dict]:
     for r in saved:
         results.append({"indicator": r["indicator"], "host": r["affected_asset"],
                         "baseline": r.get("baseline_verdict", "ERROR"), "model": r.get("model_verdict", "ERROR"),
-                        "final": r.get("VERDICT"), "stable": None, "review": r.get("needs_review")})
+                        "final": r.get("VERDICT"), "stable": None, "review": r.get("needs_review"),
+                        "finding": r.get("additional_finding")})
     return results
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input", type=Path, default=ROOT / "data" / "ioc_matches.json")
+    parser.add_argument("feed", type=Path, nargs="?", default=None,
+                        help="IOC-match feed (JSON or JSON Lines); default as for assess.py")
+    parser.add_argument("--input", type=Path, default=None, help="same as the positional feed argument")
     parser.add_argument("--expected", type=Path, default=None)
     parser.add_argument("--from-output", type=Path, default=None, help="compare a saved assessments.json instead")
     parser.add_argument("--recheck", action="store_true",
@@ -151,6 +158,7 @@ def main() -> None:
     parser.add_argument("--save-dir", type=Path, default=ROOT / "output" / "eval",
                         help="where the first run's assessments and report go (gitignored)")
     args = parser.parse_args()
+    args.input = assess.feed_path(args.feed, args.input)
 
     if args.list:
         cases, _, _ = assess.load_cases(args.input)
@@ -169,10 +177,13 @@ def main() -> None:
     else:
         config.clickhouse_settings()
         cases, asset_index, _ = assess.load_cases(args.input)
+        links, link_checks = assess.cross_case_links(cases)  # over the whole feed, before sampling
+        cases, also_matched = assess.merge_same_visits(cases, links)
         cases = [c for c in cases if (c[0]["indicator"], c[0]["affected_asset"]) in expected]
         if not args.all:
             cases = quick_sample(cases, expected, args.limit)
-        results = run_cases(cases, asset_index, max(args.repeat, 1), args.save_dir)
+        results = run_cases(cases, asset_index, max(args.repeat, 1), args.save_dir, links, link_checks,
+                            also_matched)
 
     rows = []
     for r in results:
@@ -188,6 +199,8 @@ def main() -> None:
             notes.append("MISMATCH")
         if r["review"]:
             notes.append("review")
+        if r.get("finding"):
+            notes.append("agent finding")
         if r["stable"] is False:
             notes.append("UNSTABLE across runs")
         print(f"{r['indicator'][:26]:<26} {r['host']:<16} {SHORT[r['expected']]:>9} {SHORT.get(r['baseline'], r['baseline']):>9} "
@@ -195,6 +208,15 @@ def main() -> None:
 
     for column in ("baseline", "model", "final"):
         print(f"\n{column.upper()} vs expected\n{confusion(rows, column)}")
+    judged = [r for r in rows if r["baseline"] not in ("ERROR", "INSUFFICIENT_DATA")]
+    if judged:
+        agreed = sum(1 for r in judged if r["model"] == r["baseline"])
+        print(f"\nBlind review agreed with the rules on {agreed}/{len(judged)} case(s) "
+              "(the model does not see the rules' verdict).")
+    findings = [r for r in rows if r.get("finding")]
+    print(f"Agent findings (edge cases the rules do not cover) on {len(findings)}/{len(rows)} case(s):")
+    for r in findings:
+        print(f"  - {r['indicator']} / {r['host']}: {r['finding'][:200]}")
     stable = [r["stable"] for r in rows if r["stable"] is not None]
     if stable:
         print(f"\nDeterminism: {sum(stable)}/{len(stable)} case(s) gave the same verdict on every run.")

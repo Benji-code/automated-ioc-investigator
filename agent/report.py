@@ -17,7 +17,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import config, tools
+from . import config, correlation, tools
 
 VERDICT_ORDER = {"LIKELY_THREAT": 0, "SUSPICIOUS": 1, "LIKELY_FALSE_POSITIVE": 2, "INSUFFICIENT_DATA": 3}
 VERDICT_STYLE = {
@@ -86,6 +86,66 @@ def _format_tool_call(call: dict) -> str:
             f"<pre class='tool-block'>{e(str(body)[:4000])}</pre></div>")
 
 
+def _linked_domain(result: dict) -> str:
+    links = (result.get("evidence") or {}).get("correlation") or {}
+    return links["domains"][0]["domain"] if links.get("domains") else "~"
+
+
+def _related_html(result: dict) -> str:
+    """Links to other cases whose host used the same linked domain. Same
+    visits are merged into one card, so they are not listed here."""
+    e = html.escape
+    links = (result.get("evidence") or {}).get("correlation") or {}
+    items = []
+    for r in links.get("related_cases", []):
+        if r["same_visit"]:
+            continue
+        name = case_filename({"indicator": r["indicator"], "affected_asset": r["host"]})
+        items.append(f"<a href='cases/{e(name)}'>{e(r['indicator'])} &rarr; {e(r['host'])}</a> (via {e(r['domain'])})")
+    return f"<p class='meta'><strong>Other cases with this domain:</strong> {'; '.join(items)}</p>" if items else ""
+
+
+def linked_domain_notes(results: list[dict]) -> list[str]:
+    """One note per domain behind two or more flagged indicators in the feed:
+    a report-level fact to check once, not evidence against any host."""
+    notes: dict[str, str] = {}
+    for result in results:
+        links = (result.get("evidence") or {}).get("correlation") or {}
+        for d in links.get("domains", []):
+            if d["domain"] in notes:
+                continue
+            provider = correlation.shared_provider(d["indicators"])
+            normal = f" (normal for {provider}, which gives each site more than one address)" if provider else ""
+            campus = ""
+            if "campus_hosts" in d:
+                campus = (f" On campus, {d['campus_hosts']} host(s) used it"
+                          + (f", first seen {d['campus_first_seen'][:10]}" if d.get("campus_first_seen") else "") + ".")
+            notes[d["domain"]] = (
+                f"{d['domain']} is behind {len(d['indicators'])} flagged addresses ({', '.join(d['indicators'])})"
+                f"{normal}; the IOC was probably reported against this domain. Check it on ThreatFox: if it is not "
+                f"listed, the cases that only browsed it are clean false positives.{campus}")
+    return list(notes.values())
+
+
+def _also_html(result: dict) -> str:
+    """Other flagged addresses merged into this card (the same visit)."""
+    also = (result.get("evidence") or {}).get("also_matched") or []
+    return f" <span class='also'>+ {html.escape(', '.join(also))} (same visit)</span>" if also else ""
+
+
+def _refinement_html(result: dict) -> str:
+    """What the self-check pass found and whether the model changed its answer."""
+    e = html.escape
+    r = result.get("refinement") or {}
+    if not r.get("rounds"):
+        return ""
+    found = "".join(f"<li>{e(p)}</li>" for p in r.get("problems", [])) or "<li>none found by code</li>"
+    change = "revised its answer" if r.get("changed") else "kept its answer"
+    verdict = (f" (first verdict {e(_label(r.get('first_verdict')))})"
+               if r.get("first_verdict") and r.get("first_verdict") != result.get("model_verdict") else "")
+    return f"<p><strong>Self-check:</strong> the model {change}{verdict}. Problems given to it:</p><ul>{found}</ul>"
+
+
 def _card(result: dict) -> str:
     e = html.escape
     verdict = result.get("VERDICT", "SUSPICIOUS")
@@ -102,11 +162,12 @@ def _card(result: dict) -> str:
                + "".join(f"<li>{e(n)}</li>" for n in notes) + "</ul></div>") if notes else ""
     calls = result.get("tool_calls") or []
     calls_html = "".join(_format_tool_call(c) for c in calls) or "(none)"
-    judgement = (f"<p><strong>Verdicts:</strong> baseline {e(_label(result.get('baseline_verdict')))}, model "
-                 f"{e(_label(result.get('model_verdict')))}"
-                 + (f" (overrides <code>{e(result['override_signal'])}</code>)" if result.get("override_signal") else "")
+    judgement = (f"<p><strong>Verdicts:</strong> rules {e(_label(result.get('baseline_verdict')))}; agent's blind "
+                 f"review {e(_label(result.get('model_verdict')))} ({e(result.get('model_confidence', '') or '')} "
+                 "confidence), reached without seeing the rules' result"
                  + f"</p><p><strong>Host role:</strong> {e(result.get('HOST_ROLE', ''))}</p>"
-                 f"<p><strong>Judgement:</strong> {e(result.get('KEY_JUDGEMENT', ''))}</p>")
+                 f"<p><strong>Judgement:</strong> {e(result.get('KEY_JUDGEMENT', ''))}</p>"
+                 + _refinement_html(result))
     return f"""
 <div class="card">
   <div class="card-head">
@@ -115,9 +176,10 @@ def _card(result: dict) -> str:
     {review}
     <span class="confidence">{e(result.get('CONFIDENCE', ''))} confidence</span>
   </div>
-  <h3>{e(result['indicator'])} <span class="arrow">&rarr;</span> {e(result['affected_asset'])}</h3>
+  <h3>{e(result['indicator'])}{_also_html(result)} <span class="arrow">&rarr;</span> {e(result['affected_asset'])}</h3>
   {warning}
   {sections}
+  {_related_html(result)}
   <p class="meta"><a href="cases/{e(case_filename(result))}">Markdown report</a></p>
   <details><summary>Agent's judgement</summary>{judgement}</details>
   <details><summary>Case file (evidence the agent saw)</summary>
@@ -130,7 +192,7 @@ def render(results: list[dict]) -> str:
     generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     ordered = sorted(
         results,
-        key=lambda r: (VERDICT_ORDER.get(r.get("VERDICT"), 1), not r.get("needs_review"),
+        key=lambda r: (VERDICT_ORDER.get(r.get("VERDICT"), 1), not r.get("needs_review"), _linked_domain(r),
                        -(r.get("threatfox_confidence") or 0)),
     )
     counts = {v: sum(1 for r in results if r.get("VERDICT") == v) for v in VERDICT_ORDER}
@@ -141,6 +203,9 @@ def render(results: list[dict]) -> str:
         f'<strong>{counts[v]}</strong>{VERDICT_STYLE[v][2]}</div>'
         for v in VERDICT_ORDER
     ) + f'<div class="summary-card" style="border-color:#7b1fa2"><strong>{review_count}</strong>Marked for review</div>'
+    domain_notes = linked_domain_notes(results)
+    linked_html = ("<div class='note'><strong>Linked domains</strong><ul>"
+                   + "".join(f"<li>{html.escape(n)}</li>" for n in domain_notes) + "</ul></div>") if domain_notes else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -165,6 +230,7 @@ h1 {{ margin-bottom: 4px; }}
 .card h4 {{ margin: 12px 0 4px; font-size: 0.92rem; }}
 .card p {{ line-height: 1.5; margin: 0 0 6px; font-size: 0.92rem; }}
 .arrow {{ color: #9aa0a6; }}
+.also {{ color: #5f6368; font-size: 0.85rem; font-weight: normal; }}
 .meta {{ color: #5f6368; font-size: 0.85rem; }}
 .warn {{ color: #b3261e; font-size: 0.85rem; background: #fce8e6; border-radius: 6px; padding: 6px 10px; margin: 8px 0; }}
 .warn ul {{ margin: 4px 0 0; padding-left: 18px; }}
@@ -178,11 +244,13 @@ details summary {{ cursor: pointer; color: #1a73e8; font-size: 0.88rem; }}
 <body>
 <h1>IOC Triage Report</h1>
 <p class="generated">Generated {generated}</p>
-<div class="note">Automated first-pass triage. Each card is one (indicator, {config.HOST_LABEL}) pair. The flow checks run
+<div class="note">Automated first-pass triage. Each card is one {config.HOST_LABEL}'s contact with a flagged indicator (one
+card covers a visit that matched several flagged addresses of the same site). The flow checks run
 automatically against SuperNetFlow, code works out the behaviour and a baseline verdict from fixed rules, and a local
 LLM gives its own verdict. Where the two differ, or the model's reading contradicts the evidence, the case is marked
 for human review. The data in this report is sensitive: do not share it outside the team.</div>
 <div class="summary-row">{summary_cards}</div>
+{linked_html}
 {cards_html}
 </body>
 </html>

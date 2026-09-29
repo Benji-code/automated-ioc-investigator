@@ -38,7 +38,11 @@ def _load_env_file(path: Path) -> None:
             line = line[len("export "):]
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if value[:1] in ('"', "'"):
+            value = value.strip('"').strip("'")
+        else:
+            value = value.split(" #", 1)[0].strip()  # trailing comment on an unquoted value
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -57,6 +61,12 @@ PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/chat")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()  # optional
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")  # any locally pulled tool-calling model
+# Thinking mode for models that have one (e.g. the Qwen3 family): "0" off,
+# "1" on, unset = don't send the option (the model's default; models without
+# thinking reject it). Off is faster and keeps hidden reasoning from using up
+# the reply budget; on may reason better but is much slower.
+_THINK = os.getenv("OLLAMA_THINK", "").strip().lower()
+OLLAMA_THINK = None if _THINK == "" else _THINK in ("1", "true", "yes", "on")
 # Context window in tokens. Measured (task 3): system prompt plus case file is
 # 8-11k tokens, and up to 4 tool rounds add more; Ollama silently drops the
 # START of a prompt that overflows. qwen2.5:7b supports 32k.
@@ -72,6 +82,10 @@ SEED = 0           # Ollama: fixed sampling seed, for the same reason
 # Model-callable tool rounds per case (timeline_around, host_baseline,
 # compare_sessions, run_sql) before a final text answer is forced.
 MAX_TOOL_ROUNDS = _int_env("MAX_TOOL_ROUNDS", 4)
+# Self-check passes: the model gets its reply back with a proofreading
+# checklist and any problems code found, and returns a corrected answer.
+# 0 turns it off; each pass is one more model call per case.
+MODEL_REFINE_ROUNDS = _int_env("MODEL_REFINE_ROUNDS", 1)
 MAX_TOKENS = 3000  # reasoning models can spend much of this on hidden "thinking";
                    # llm_client grows it on retry if a reply is cut off
 

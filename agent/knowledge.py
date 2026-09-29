@@ -354,7 +354,7 @@ HOST_ACTIVITY_HINTS: dict[str, tuple[str, ...]] = {
         "steampowered.com", "steamcontent.com", "steamserver.net", "epicgames.com", "riotgames.com",
         "xboxlive.com", "playstation.net", "minecraft.net", "mojang.com", "battle.net", "ea.com", "roblox.com",
     ),
-    "streaming and social media": (
+    "streaming or social media": (
         "youtube.com", "googlevideo.com", "netflix.com", "nflxvideo.net", "spotify.com", "tiktokcdn.com",
         "tiktokv.com", "instagram.com", "facebook.com", "fbcdn.net", "twitch.tv", "discord.com", "discord.gg",
     ),
@@ -450,6 +450,29 @@ PUBLIC_RESOLVERS: dict[str, str] = {
     "94.140.14.14": "AdGuard", "94.140.15.15": "AdGuard", "223.5.5.5": "AliDNS", "223.6.6.6": "AliDNS",
     "114.114.114.114": "114DNS", "119.29.29.29": "DNSPod", "76.76.2.0": "Control D",
 }
+
+
+# Authoritative nameserver ranges (from the provider's published IP ranges).
+# A normal client asks a RESOLVER; asking an authoritative server directly
+# means the host runs its own recursive resolver (or the sensor sees only one
+# direction of the traffic).
+AUTHORITATIVE_DNS_RANGES: dict[str, str] = {
+    "205.251.192.0/21": "AWS Route 53 authoritative nameservers",   # ip-ranges.amazonaws.com, service ROUTE53
+    "205.251.200.0/23": "AWS Route 53 authoritative nameservers",
+}
+
+
+def authoritative_dns(ip: str) -> str | None:
+    import ipaddress
+
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for cidr, name in AUTHORITATIVE_DNS_RANGES.items():
+        if address in ipaddress.ip_network(cidr):
+            return name
+    return None
 
 
 # --- SuperNetFlow application labels (task 3) -------------------------------------

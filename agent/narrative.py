@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from . import config, knowledge, signals
+from . import config, correlation, knowledge, signals
 from .analysis import fmt_bytes, fmt_duration
 
 MAX_NAMES = 3
@@ -88,7 +88,11 @@ def _sentence(text: str) -> str:
 
 
 def _lower_first(text: str) -> str:
-    return text[:1].lower() + text[1:] if text else text
+    """Lower-case the first letter for use mid-sentence, but leave acronyms
+    and codes ("STEP 7b", "QUIC") alone."""
+    if not text or (len(text) > 1 and text[1].isupper()):
+        return text
+    return text[:1].lower() + text[1:]
 
 
 def _ports_text(ports: list[tuple[int, str]]) -> str:
@@ -267,8 +271,8 @@ def _finding(ev: dict, category: str) -> str:
             site = "the name of the site it visited was hidden by Encrypted Client Hello"
         else:
             site = "no site name was recorded"
-        return (f"The flow data shows ordinary web traffic ({_ports_text(ports)}) to a shared {_provider(ev)} "
-                f"address that serves many unrelated sites, and {site}.")
+        return (f"The flow data shows ordinary web traffic ({_ports_text(ports)}) to {shared_address_phrase(ev)}, "
+                f"and {site}.")
     if category == "web":
         return f"The flow data shows web traffic ({_ports_text(ports)}) to the IP."
     if category == "no_traffic":
@@ -303,12 +307,90 @@ def _baseline_clause(result: dict) -> str:
     final = result.get("VERDICT")
     if final == "INSUFFICIENT_DATA" or not baseline:
         return ""
-    if result.get("override_signal"):
-        return (f"; the rule-based baseline said {VERDICT_PHRASE.get(baseline, baseline)}, but the model "
-                f"overrode it on {result['override_signal'].replace('_', ' ')}, so this needs a human check")
     if model and model != baseline:
-        return ", from the rule-based baseline (the model disagreed without evidence, so this needs a human check)"
-    return ", and the rule-based baseline agrees"
+        return (f", from the rule-based checks; the agent's independent review, which did not see that result, "
+                f"judged it {VERDICT_PHRASE.get(model, model)} instead, so this needs a human check")
+    return ", from the rule-based checks, and the agent's independent review, which did not see that result, agrees"
+
+
+def disagreement_note(result: dict) -> str:
+    """When the blind review disagrees, its reasoning goes in the report for
+    the human who has to settle it (unless it quotes invented numbers)."""
+    model = result.get("model_verdict")
+    if not model or model == result.get("baseline_verdict") or result.get("VERDICT") == "INSUFFICIENT_DATA":
+        return ""
+    judgement = (result.get("KEY_JUDGEMENT") or "").strip()
+    if not judgement or result.get("unverified_numbers"):
+        return f"The agent's independent review judged this {VERDICT_PHRASE.get(model, model)}."
+    return f"The agent's independent review judged this {VERDICT_PHRASE.get(model, model)}: {_sentence(judgement)}"
+
+
+UPLOAD_NOTABLE_BYTES = 1_000_000  # more than this sent, and more sent than received, counts as uploading
+
+
+def substantial_contact(ev: dict) -> str | None:
+    """Why the host's own traffic to the flagged IP is more than a single
+    browsing visit: repeated contact, non-web traffic or uploads. None for
+    one short visit, which a linked domain alone does not make suspicious."""
+    flows = ev.get("flows", {}) or {}
+    if "error" in flows:
+        return None
+    f = (ev.get("contact") or {}).get("features", {}) or {}
+    days = len(signals._active_days(flows))
+    if (f.get("bursts") or 0) >= 3 or days >= 2:
+        return f"repeated contact ({_plural(f.get('bursts') or 0, 'burst')} over {_plural(max(days, 1), 'day')})"
+    non_web = sorted({p for p, _ in signals._ports(flows) if p not in (80, 443)})
+    if non_web:
+        return f"non-web traffic (port {_join([str(p) for p in non_web])})"
+    up, down = signals._total_bytes(flows)
+    if (flows.get("notable") or {}).get("upload_heavy_total") or (up >= UPLOAD_NOTABLE_BYTES and up > down):
+        return f"uploads ({fmt_bytes(up)} sent, {fmt_bytes(down)} received)"
+    return None
+
+
+def correlation_sentence(ev: dict) -> str:
+    """A neutral note for a case whose site is also behind other flagged
+    addresses. The link is not evidence against the host; only substantial
+    contact from this host makes it worth a review."""
+    links = ev.get("correlation")
+    if not links:
+        return ""
+    d = links["domains"][0]
+    others = [i for i in d["indicators"] if i != ev["identity"]["indicator"]]
+    provider = correlation.shared_provider(d["indicators"])
+    normal = (f", which is normal for {provider}: it gives each site more than one address" if provider else "")
+    text = (f"Its site, {d['domain']}, is also behind {_join(others)} in this feed{normal}; the indicator was "
+            "probably reported against the domain (see the linked-domain note at the top of report.html)")
+    reason = substantial_contact(ev)
+    if reason:
+        text += f". This host's own contact with it is more than one visit ({reason}), so it is marked for review"
+    return _sentence(text)
+
+
+def finding_sentence(result: dict) -> str:
+    """Summary line for a finding the agent raised that the rule-based checks
+    do not cover (already checked against the evidence in assess.py)."""
+    finding = result.get("additional_finding")
+    if not finding:
+        return ""
+    first = finding.split(". ")[0].rstrip(".")
+    return (f"The agent's review raised a point the rule-based checks do not cover: {_lower_first(first)}; the case "
+            "is marked for review.")
+
+
+def finding_paragraph(result: dict) -> str:
+    finding = result.get("additional_finding")
+    if not finding:
+        return ""
+    return f"Agent's finding (not covered by the rule-based checks): {_sentence(finding)}"
+
+
+def also_matched_sentence(ev: dict) -> str:
+    also = ev.get("also_matched") or []
+    if not also:
+        return ""
+    return (f"The same visit also matched {_join(also)}, another flagged address of the same site; this report "
+            "covers both.")
 
 
 def summary(result: dict, ev: dict, category: str) -> str:
@@ -325,6 +407,9 @@ def summary(result: dict, ev: dict, category: str) -> str:
         f"We assess this as {VERDICT_PHRASE.get(result['VERDICT'], result['VERDICT'])} "
         f"({result.get('CONFIDENCE') or 'low'} confidence){_baseline_clause(result)}.",
         risk_note(ev, category),
+        correlation_sentence(ev),
+        also_matched_sentence(ev),
+        finding_sentence(result),
     ]
     return " ".join(_sentence(p) for p in parts if p)
 
@@ -422,6 +507,8 @@ def _observed(ev: dict) -> str:
         shape = "held open for hours or days"
     elif flows.get("long_flow_count", 0) > 3:
         shape = f"in {flows['long_flow_count']} separate sessions"
+    elif ((ev.get("contact") or {}).get("features") or {}).get("bursts") == 1:
+        shape = "in a single short session"
     else:
         shape = "in a few sessions"
     days = len(signals._active_days(flows))
@@ -503,7 +590,7 @@ def role_contradicts_uptime(role: str, uptime: dict) -> bool:
 ROLE_EVIDENCE = (
     (("gaming", "game"), ("gaming",), ("Gameplay", "Gaming Download")),
     (("develop",), ("software development",), ()),
-    (("media", "stream"), ("self-hosted media", "streaming and social media"), ("Video", "Music", "Live Video")),
+    (("media", "stream"), ("self-hosted media", "streaming or social media"), ("Video", "Music", "Live Video")),
     (("home lab", "homelab", "self-host"), ("home lab or self-hosted services",), ()),
 )
 # Roles no evidence in this data can support.
@@ -551,8 +638,11 @@ def _uptime_sentence(ev: dict) -> str:
         return f"The host stays busy around the clock ({night}), which points to {what}."
     if uptime.get("always_on") is False:
         return f"The host goes almost silent at night ({night}), like a personal device used in waking hours."
-    return (f"The host is always connected, with little traffic at night ({night}): background traffic, which "
-            "any connected device has, so it says nothing about what the machine is.")
+    if ratio >= 0.5:
+        return (f"The host sends only a trickle at any hour ({night}): background traffic, which any connected "
+                "device has, so it says nothing about what the machine is.")
+    return (f"The host is always connected but much quieter at night ({night}): background traffic, which any "
+            "connected device has, so it says nothing about what the machine is.")
 
 
 def _agent_reading(result: dict, ev: dict) -> str:
@@ -595,6 +685,26 @@ def _join_sentences(*parts: str) -> str:
     return " ".join(_sentence(p) for p in parts if p)
 
 
+def sites_seen(ev: dict) -> list[str]:
+    """Root domains actually seen on the flagged IP campus-wide (names_on_ip)."""
+    pdns = next((p for p in ev.get("names_on_ip", []) if "error" not in p), None)
+    return [d["root_domain"] for d in (pdns or {}).get("domains", [])]
+
+
+def shared_address_phrase(ev: dict) -> str:
+    """'a shared Cloudflare address that serves many unrelated sites (7 seen on
+    it on campus)' only when more than one site was actually seen; otherwise
+    say what was seen, so the report never claims more than the data shows."""
+    sites = sites_seen(ev)
+    provider = _provider(ev)
+    if len(sites) > 1:
+        return (f"a shared {provider} address that serves many unrelated sites "
+                f"({len(sites)} seen on it on campus, including {_join(sites[:3])})")
+    if len(sites) == 1:
+        return f"a {provider} address, where only {sites[0]} was seen on campus"
+    return f"a {provider} address (a provider whose addresses normally front many sites; none was named on it on campus)"
+
+
 def _shared_reason(ev: dict) -> str:
     """Why the address counts as shared, in the words of what triggered it."""
     pdns = next((p for p in ev.get("names_on_ip", []) if "error" not in p), None)
@@ -605,7 +715,9 @@ def _shared_reason(ev: dict) -> str:
         return f"but it is the public {_service_short(service)} server, which many people use"
     info = _first_ip(ev)
     if info.get("shared_range") or info.get("shared_asn"):
-        return f"but it is a {_provider(ev)} address, which serves many unrelated sites"
+        if len(sites_seen(ev)) > 1:
+            return f"but it is a {_provider(ev)} address, which serves many unrelated sites"
+        return f"but it is a {_provider(ev)} address, a provider whose addresses normally front many sites"
     return "so the address is shared infrastructure"
 
 
@@ -655,8 +767,7 @@ def contact_paragraph(ev: dict) -> str:
              else f"{table}, {contact.get('resolution_min', 1)}-minute resolution")
     parts = [f"Contact pattern ({where}): "
              f"{contact['description'].lower()}. There {'was' if f['bursts'] == 1 else 'were'} "
-             f"{_plural(f['bursts'], 'burst')} of contact from {_fmt_day(_day(f['first']), False)} to "
-             f"{_fmt_day(_day(f['last']))}"]
+             f"{_plural(f['bursts'], 'burst')} of contact {_span(f['first'], f['last'])}"]
     if f.get("median_gap_min"):
         parts[0] += f", typically {fmt_duration(f['median_gap_min'] * 60)} apart"
     parts[0] += f", with {f['night_share']:.0%} of the contact between midnight and 6 am local time."
@@ -716,12 +827,22 @@ def dns_line(ev: dict) -> str:
         return (f"DNS behaviour: nothing unusual; the little DNS it sends outside campus goes to public resolvers "
                 f"({_join(public) or 'common ones'}){common} (dns_tuple). {caveat}")
     parts = []
-    if dns.get("rare_resolvers"):
-        parts.append(f"it asks {_join(dns['rare_resolvers'][:2])}, a DNS server few campus hosts use")
+    details = dns.get("rare_resolver_details") or [{"server_ip": ip} for ip in dns.get("rare_resolvers", [])]
+    if details:
+        ips = _join([d["server_ip"] for d in details[:2]])
+        owner = next((f"AS{d['asn']} {d['asn_org']}" for d in details if d.get("asn")), "")
+        kind = next((d["authoritative"] for d in details if d.get("authoritative")), None)
+        text = f"it sends DNS to {ips}" + (f" ({owner})" if owner else "") + ", which few campus hosts ask"
+        if kind:
+            text += (f"; these are {kind}, not resolvers, and a normal client asks a resolver, so the host may run "
+                     "its own recursive resolver")
+        parts.append(text)
     if dns.get("unanswered_high"):
         median = dns.get("campus_median_unanswered_ratio")
         parts.append(f"{dns['unanswered_ratio']:.0%} of its DNS queries went unanswered"
                      + (f" (campus median {median:.0%})" if median is not None else ""))
+        if dns["unanswered_ratio"] >= 0.95:
+            parts.append("with nothing answered, the sensor may be seeing only one direction of this traffic")
     return f"DNS behaviour: {'; '.join(parts)} (dns_tuple), a weak hint on its own. {caveat}"
 
 
@@ -731,7 +852,7 @@ def analysis(result: dict, ev: dict, category: str) -> str:
         return _sentence(f"Checked: {checked}") + " " + _peers_sentence(ev)
     parts = [_names_sentence(ev), *_flow_sentences(ev), *_comparison_sentences(ev),
              _other_traffic_sentence(ev, result), _peers_sentence(ev)]
-    extra = [contact_paragraph(ev), apps_line(ev), dns_line(ev)]
+    extra = [finding_paragraph(result), contact_paragraph(ev), apps_line(ev), dns_line(ev)]
     return "\n\n".join([" ".join(p for p in parts if p)] + [e for e in extra if e])
 
 
@@ -750,7 +871,11 @@ def _verdict_statement(result: dict, ev: dict, category: str) -> str:
         if category in ("tunnel_client", "remote_access_client"):
             why = f"the host shows no sign of infection and runs its own {_service_short(service)} client"
         elif category == "web_shared":
-            why = "the host was browsing a shared address used by many unrelated sites, and nothing points to infection"
+            if len(sites_seen(ev)) > 1:
+                why = "the host was browsing a shared address used by many unrelated sites, and nothing points to infection"
+            else:
+                why = (f"the host was browsing through a {_provider(ev)} address (a provider that fronts many sites), "
+                       "and nothing points to infection")
         else:
             why = "the traffic does not fit how an infected host behaves"
         return f"The IOC match appears to be a false positive for {family}: {why}."
@@ -831,11 +956,18 @@ def next_steps(result: dict, ev: dict, category: str) -> list[str]:
         listed = _join([knowledge.SERVICE_PROFILES.get(s["service"], {"name": s["service"]})["name"].split(" (")[0]
                         for s in others])
         steps.append(f"review the other tunnels or remote-access tools the host runs ({listed})")
+    if result.get("additional_finding"):
+        steps.insert(0, "check the agent's finding against the evidence")
+    # One action per card: a case marked for review is reviewed, not closed.
+    if result.get("needs_review"):
+        steps = [s for s in steps if not s.startswith(("close this alert", "treat ip:port"))]
+        steps.insert(0, "review this case before acting on it (the reasons it was marked are listed below)")
     return list(dict.fromkeys(steps))
 
 
 def conclusion(result: dict, ev: dict, category: str) -> str:
-    parts = [_verdict_statement(result, ev, category), _confidence_statement(result, ev, category)]
+    parts = [_verdict_statement(result, ev, category), _confidence_statement(result, ev, category),
+             disagreement_note(result)]
     risk = risk_note(ev, category)
     if risk:
         parts.append(risk)

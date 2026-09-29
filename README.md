@@ -84,13 +84,56 @@ The baseline verdict follows fixed rules (`signals.baseline_verdict`):
 6. Only signals against threat: **LIKELY_FALSE_POSITIVE** (low confidence)
 7. Nothing either way: **SUSPICIOUS** (low confidence)
 
-The model may disagree only by naming the signal it overrides in
-`BASELINE_OVERRIDE` with the evidence against it (not ThreatFox confidence);
-otherwise the baseline stands. Any disagreement, and any reply that
-contradicts the evidence (says "does not match" but escalates, claims
-exfiltration with no flow over the threshold, contradicts the shared-
-infrastructure signal, or quotes numbers not in the evidence), marks the case
-for human review.
+The baseline is the verdict. The model then reviews the case **blind**: it
+gets all the evidence but not the signals, the behaviour category or the
+baseline, and gives its own verdict. It is never shown an answer to agree
+with, so its verdict is an independent check. If it disagrees with the rules,
+or its reasoning contradicts the evidence (says "does not match" but
+escalates, claims exfiltration with no flow over the threshold, contradicts
+the shared-infrastructure signal, or quotes numbers not in the evidence), the
+case is marked for human review and the report gives both readings.
+`eval/run_eval.py` reports how often the blind review agrees with the rules.
+
+**Agent findings (edge cases).** Besides its verdict, the model can raise an
+`ADDITIONAL_FINDING`: something specific the evidence shows that a routine
+reading of the case would miss, naming the case-file section it comes from.
+A finding that passes the checks (every number in the evidence, a section
+named, no reliance on ThreatFox confidence) goes into the core report: a
+sentence in the summary, a labelled paragraph in the behaviour analysis, and
+"check the agent's finding" as the next step, with the case marked for review.
+A finding that fails the checks is left out of the report but still marks the
+case for review, with the finding and the reason shown to the reviewer.
+`eval/run_eval.py` lists every finding, so you can judge whether a model finds
+real edge cases or adds noise.
+
+**Self-check.** After its first answer, the model gets the answer back with a
+proofreading checklist (numbers in the evidence, verdict consistent with its
+reasoning, benign and malicious explanations weighed, remaining risk named,
+host role backed by evidence, no reliance on ThreatFox confidence) plus any
+problems code found in it, and returns a corrected answer. The checks never
+reveal the rules' verdict, so the review stays blind. One pass by default
+(`MODEL_REFINE_ROUNDS`, 0 to turn off); thinking models such as `qwen3.5:9b`
+benefit most.
+
+### Cross-case links
+
+After grouping, `agent/correlation.py` looks for a domain that sits behind two
+or more different flagged indicators in the same feed. That is usually how the
+indicator was reported: someone looked up a domain and submitted each of its
+addresses (a Cloudflare site, for example, always has more than one). So the
+link is **one note at the top of the report**, not evidence against any host:
+"envoydev.co is behind 2 flagged addresses (normal for Cloudflare); the IOC was
+probably reported against this domain. Check it on ThreatFox", with how many
+campus hosts used it and when it first appeared.
+
+- A case is marked for review for the link only when the host's own contact
+  with the domain is more than one visit: repeated contact, non-web traffic or
+  uploads.
+- Cases whose site name was hidden (ECH) are not linked; the report just says
+  which site was seen on that address.
+- One host visiting one site through two flagged addresses is one visit: the
+  duplicate is not assessed again, and one card covers both addresses.
+- Each card gives one action: close it or review it, never both.
 
 ### Follow-up tools the model can call
 
@@ -118,7 +161,7 @@ agent/
   signals.py         evidence signals and the baseline verdict rules
   beacon.py          per-minute contact pattern (periodic, held open, human, ...)
   schema.py          verified table descriptions: the model's schema card and docs/schema.md
-  data/applications.json  SuperNetFlow app categories: benign, neutral, remote access
+  data/applications.json  SuperNetFlow app categories: benign, neutral, remote access, VPN/privacy relay
   behaviour.py       behaviour category (tunnelling, beaconing, web on shared infrastructure, ...)
   narrative.py       the report's three paragraphs, written from the evidence
   domain_features.py offline domain/IP features (registered domain, shared ASNs, DGA-like)
@@ -152,14 +195,26 @@ pip install -r requirements.txt
    ```bash
    ollama serve
    ```
-3. Pull the default model:
+3. Pull the recommended model and set it in `.env`:
    ```bash
-   ollama pull qwen2.5:7b
+   ollama pull qwen3.5:9b
+   ```
+   ```
+   OLLAMA_MODEL=qwen3.5:9b
+   OLLAMA_THINK=0
    ```
 
-A larger model gives better verdicts if your hardware allows it (for example
-`qwen2.5:14b` or `qwen2.5:32b`). Set `OLLAMA_MODEL` in `.env` to use it. The
-agent asks Ollama for a 24k-token context (`OLLAMA_NUM_CTX`): the system
+`qwen3.5:9b` (6.6 GB download, about 9-10 GB of memory with the agent's
+context) is the recommended model: it follows the reply template and the
+self-check better than the smaller one. It has a thinking mode: `OLLAMA_THINK=0`
+is faster and repeatable; `1` lets it reason before answering, which is several
+times slower per case (its hidden reasoning also counts against the reply
+budget). On a machine with less memory, `qwen2.5:7b` also works (4.7 GB; leave
+`OLLAMA_THINK` unset, as it has no thinking mode). Anything larger that
+supports tool calls works too; set `OLLAMA_MODEL` to it. The code is the same
+for every model.
+
+The agent asks Ollama for a 24k-token context (`OLLAMA_NUM_CTX`): the system
 prompt plus a case file measured 8-11k tokens, and follow-up tool results add
 more. Ollama's 4k default is far too small and silently cuts off the start of
 the prompt; a case whose prompt comes within 5% of the limit is marked for
@@ -228,24 +283,28 @@ agent reports as `evidence_first_seen` / `evidence_last_seen`.
 
 ## Running it
 
+The feed is the first argument: a JSON list of match records, or JSON Lines
+(`.jsonl`, one record per line). With no argument, `data/ioc_matches.jsonl` is
+used, else `data/ioc_matches.json`.
+
 ```bash
 # fake sample feed (the hosts are fake, so expect "no traffic found")
-python assess.py --input data/sample/ioc_matches_sample.json
+python assess.py data/sample/ioc_matches_sample.json
 
-# a real feed
-python assess.py --input data/ioc_matches.json
+# a real feed, by name
+python assess.py data/ioc_matches.jsonl
 
 # one indicator only
-python assess.py --input data/ioc_matches.json --indicator bore.pub
+python assess.py data/ioc_matches.jsonl --indicator bore.pub
 
 # the first 5 cases, then continue later without redoing finished ones
-python assess.py --input data/ioc_matches.json --limit 5
-python assess.py --input data/ioc_matches.json --resume
+python assess.py data/ioc_matches.jsonl --limit 5
+python assess.py data/ioc_matches.jsonl --resume
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--input` | IOC-match feed (JSON list). Default `data/ioc_matches.json` |
+| `feed` (first argument) | IOC-match feed: JSON list or JSON Lines (`.jsonl`). Default `data/ioc_matches.jsonl`, else `data/ioc_matches.json`. `--input FILE` also works |
 | `--output-dir` | Where to write results. Default `output/` |
 | `--limit N` | Only assess the first N cases (highest ThreatFox confidence first) |
 | `--indicator X` | Only assess cases for this exact indicator |
@@ -258,11 +317,13 @@ python assess.py --input data/ioc_matches.json --resume
 at most 6, about a minute and a half) or, with `--all`, every case with an
 expected verdict, and prints expected vs baseline vs model vs final, with
 confusion tables.
-Expected verdicts come from `data/expected_verdicts.json` (real IPs,
-gitignored) if present, else `eval/expected_verdicts.json` (fake IPs).
+Like `assess.py`, it takes the feed as the first argument (JSON or JSON
+Lines), with the same default. Expected verdicts come from
+`data/expected_verdicts.json` (real IPs, gitignored) if present, else
+`eval/expected_verdicts.json` (fake IPs).
 
 ```bash
-python eval/run_eval.py --list              # every case in the feed, to fill in expected verdicts
+python eval/run_eval.py data/ioc_matches.jsonl --list   # every case in the feed, to fill in expected verdicts
 python eval/run_eval.py                        # quick sample: one case per indicator, at most 6
 python eval/run_eval.py --all --repeat 2       # everything, model twice per case: checks determinism (slow)
 python eval/run_eval.py --from-output output/assessments.json   # compare a saved run, no new model calls
