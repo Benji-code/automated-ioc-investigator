@@ -647,56 +647,64 @@ def query_span_days(sql: str, now: datetime | None = None) -> float | None:
     return max(spans) if spans else None
 
 
-def run_sql(sql: str, case_client_ip: str, case_server_ips: list[str] | tuple = ()) -> str:
-    """Run a model-written query after checking it in code:
+def check_sql(sql: str, case_client_ip: str, case_server_ips: list[str] | tuple = (),
+              row_cap: int = MAX_SQL_ROWS) -> tuple[str | None, str]:
+    """Check a model-written query in code. Returns (error, query to run):
       - SELECT only, on the tables in schema.RUN_SQL_TABLES;
       - filtered on this case's client_ip, or on one of its flagged server IPs;
       - filtered on a time column, spanning at most the table's limit (e.g.
         5 days for per-minute tables, 30 for 5-minute, 90 for hourly);
-      - capped at MAX_SQL_ROWS rows.
-    It uses a real shared-database credential, so it is stricter than a
-    teaching sandbox: an unscoped query can hit the 200-million-row read limit.
-    Each rejection says why, so the model can fix its query."""
+      - a LIMIT of row_cap added if the query has none.
+    Each error says why, so the model can fix its query."""
     stripped = sql.strip().rstrip(";")
     lowered = stripped.lower()
 
     if not re.match(r"(?is)^\s*select\b", stripped):
-        return "Error: only SELECT statements are allowed."
+        return "Error: only SELECT statements are allowed.", ""
 
     for forbidden in ("drop", "delete", "insert", "update", "alter", "truncate", "create", "grant", "attach"):
         if re.search(rf"(?i)\b{forbidden}\b", lowered):
-            return f"Error: '{forbidden}' is not allowed - only SELECT."
+            return f"Error: '{forbidden}' is not allowed - only SELECT.", ""
 
     tables = [name for name in RUN_SQL_TABLES if name in lowered]
     if not tables:
-        return f"Error: query must reference one of the allowed tables: {', '.join(RUN_SQL_TABLES)}."
+        return f"Error: query must reference one of the allowed tables: {', '.join(RUN_SQL_TABLES)}.", ""
 
     allowed_ips = [case_client_ip, *case_server_ips]
     if not any(f"'{ip}'" in stripped for ip in allowed_ips):
         return (
             f"Error: query must filter on this case's client_ip ('{case_client_ip}') or on a flagged server_ip "
             f"({', '.join(repr(ip) for ip in case_server_ips) or 'none'}) - without it the query scans the "
-            "whole table and can hit ClickHouse's 200-million-row read limit."
-        )
+            "whole table and can hit ClickHouse's 200-million-row read limit.", "")
 
     if not re.search(r"(?i)\b(time|start|finish)\b\s*(>=|>|<=|<|=|between)", lowered):
         return ("Error: query must filter on a time column (time, start or finish) - the tables are too large "
-                "to scan without a time bound.")
+                "to scan without a time bound."), ""
 
     limit_days = min(RUN_SQL_TABLES[name].run_sql_max_days for name in tables)
     span = query_span_days(stripped)
     if span is None:
         return ("Error: could not read the query's time span. Bound the time column with literal datetimes "
-                "('2026-09-15 00:00:00') or now() - INTERVAL n DAY.")
+                "('2026-09-15 00:00:00') or now() - INTERVAL n DAY."), ""
     if span > limit_days + 1e-6:
         return (f"Error: the query spans {span:.1f} days, but {', '.join(tables)} allows at most {limit_days} "
-                "days per query. Narrow the window, or use a coarser table (5-minute or hourly) for long ranges.")
+                "days per query. Narrow the window, or use a coarser table (5-minute or hourly) for long ranges."), ""
 
     if "limit" not in lowered:
-        stripped += f" LIMIT {MAX_SQL_ROWS}"
+        stripped += f" LIMIT {row_cap}"
+    return None, stripped
+
+
+def run_sql(sql: str, case_client_ip: str, case_server_ips: list[str] | tuple = ()) -> str:
+    """Run a model-written query after check_sql, capped at MAX_SQL_ROWS rows.
+    It uses a real shared-database credential, so it is stricter than a
+    teaching sandbox: an unscoped query can hit the 200-million-row read limit."""
+    error, checked = check_sql(sql, case_client_ip, case_server_ips)
+    if error:
+        return error
 
     try:
-        df = query(stripped)
+        df = query(checked)
     except Exception as exc:  # noqa: BLE001 - the ClickHouse error is what the model needs to fix its query
         return f"Error running query: {exc}"
 

@@ -1,11 +1,13 @@
-# IOC Triage Agent
+# IOC Investigation Agent
 
-An LLM agent that triages IOC matches on a campus network. It reads a feed of
-IOC matches (each one a [ThreatFox](https://threatfox.abuse.ch) indicator plus
-the internal host that contacted it), analyses the host's flow records from
-SuperNetFlow in ClickHouse, computes evidence signals and a rule-based
-baseline verdict, and asks a local LLM for its own verdict. It writes an HTML
-overview and one Markdown report per case.
+An LLM agent that investigates IOC matches on a campus network. It reads a
+feed of IOC matches (each one a [ThreatFox](https://threatfox.abuse.ch)
+indicator plus the internal host that contacted it), gathers the host's flow
+records from SuperNetFlow in ClickHouse, and hands the evidence to the model,
+which runs its own follow-up queries, picks 1-3 charts, and writes the report
+and verdict. Code checks the report against the evidence and against a
+rule-based baseline verdict. It writes an HTML report and one Markdown report
+per case.
 
 The agent has no internet access. It works only from the feed, ClickHouse and
 a local knowledge base of threat, malware and service profiles.
@@ -23,23 +25,41 @@ follow-up tools (below).
 | 3 | Identify every flagged IP, its ASN and whether it is shared infrastructure | Auto | `tools.identify_server_ips`, `tools.ip_asn` |
 | 4 | Set expected behaviour: threat type, malware family, known services; domain features | Auto | `tools.expected_behaviour`, `tools.domain_features`, `knowledge.py` |
 | 5 | Analyse flows between host and flagged IP, the names (SNI/DNS) the host used on it, the per-minute contact pattern, and app labels | Auto | `tools.indicator_flows`, `tools.indicator_names`, `tools.beacon_analysis`, `tools.app_context_for_indicator`, `beacon.py` |
-| 6 | Compare with expected compromised behaviour | Agent | prompt in `assess.py` |
+| 6 | Compare with expected compromised behaviour, investigating further with its own queries | Agent | prompt in `assess.py`, follow-up tools |
 | 7 | Compare with the host's traffic to other IPs: apps, user-agent platform, DNS behaviour, load and uptime | Auto + agent | `tools.host_other_traffic`, `tools.host_applications`, `tools.host_dns_behaviour`, `tools.host_load_baseline` |
+| 7b | Classify the host (workstation, NAT gateway, web server, ...) and compare it with typical hosts of that type | Auto + agent | `agent/host_type.py`, `host_classification/` |
 | 8 | Other internal hosts on the flagged IP, and every name on it campus-wide (one day per query) | Auto | `tools.indicator_peers`, `tools.names_on_ip` |
-| 9 | Signals, behaviour category and baseline verdict (code), then the model's verdict, checked by code | Auto + agent | `signals.py`, `behaviour.py`, `assess.py` |
-| 10 | Write the three-paragraph report | Auto | `narrative.py`, `report.py` |
+| 9 | Signals, behaviour category and baseline verdict (code); the model's own verdict | Auto + agent | `signals.py`, `behaviour.py`, `assess.py` |
+| 10 | Write the report, with 1-3 charts the model chooses; code checks it | Agent + auto | `assess.py`, `charts.py`, `report.py` |
 
-The report is written in code from the evidence, so every number is real and
-the remaining risk (e.g. a tunnel exposing a campus host) is never dropped.
-The model's job is the judgement: its verdict (checked against the baseline),
-a reading of the case for the reviewer, and follow-up queries if it wants
-them. Keeping its reply short also keeps each case to a few seconds.
+The model writes the report, in four parts:
+
+- **Executive summary**: three to five sentences: what happened, the verdict
+  and main reason, and the one thing to do.
+- **Analysis**: the investigation as connected reasoning: what the flows and
+  its own queries show, the benign explanation weighed against the malicious
+  one, what decides it, with its charts.
+- **Conclusion and next steps**: verdict and confidence, remaining risk, what
+  the evidence cannot show, numbered steps specific to the host.
+- **Background** (folded away in the report): what the host appears to be,
+  what the threat is, what a compromised host would look like in flow data,
+  and what the flagged address is.
+
+The prompt says what each part covers and asks for an analyst's own words
+and specific facts (times, names, ports, volumes, comparisons), not a
+template to fill in. Every report is the model's own writing, including
+cases with no traffic (code records those as INSUFFICIENT_DATA, and the number
+check catches any traffic detail the model invents). Code never writes report
+text: it checks the report (below), and a missing or incomplete report is shown
+as written and marked for review. The charts the model chose are collected in
+a collapsible **Figures** section at the end; where the model placed one, the
+text links to it.
 
 Each case gets a **behaviour category** (`agent/behaviour.py`): tunnelling,
 remote access, connection to a tunnel's public port, C2-like beaconing,
 persistent connection to an unrecognised service, file download, web visit
 to the flagged site, web browsing through shared infrastructure, other, or no
-traffic. It drives the report's wording and next steps.
+traffic. It is shown as a label on the case; the model does not see it.
 
 Checks that must always happen are run in Python, not left to the model: in
 testing, a small local model skipped optional tools almost every time.
@@ -84,36 +104,34 @@ The baseline verdict follows fixed rules (`signals.baseline_verdict`):
 6. Only signals against threat: **LIKELY_FALSE_POSITIVE** (low confidence)
 7. Nothing either way: **SUSPICIOUS** (low confidence)
 
-The baseline is the verdict. The model then reviews the case **blind**: it
-gets all the evidence but not the signals, the behaviour category or the
-baseline, and gives its own verdict. It is never shown an answer to agree
-with, so its verdict is an independent check. If it disagrees with the rules,
-or its reasoning contradicts the evidence (says "does not match" but
-escalates, claims exfiltration with no flow over the threshold, contradicts
-the shared-infrastructure signal, or quotes numbers not in the evidence), the
-case is marked for human review and the report gives both readings.
-`eval/run_eval.py` reports how often the blind review agrees with the rules.
+The model gets the objective evidence (the case file) but **not** the
+signals, the behaviour category or the baseline: shown an answer, a model
+tends to agree with it. Its verdict is the report's verdict, and the baseline
+is a cross-check. The case is marked for human review, with both readings and
+the rules' reason shown, when:
 
-**Agent findings (edge cases).** Besides its verdict, the model can raise an
-`ADDITIONAL_FINDING`: something specific the evidence shows that a routine
-reading of the case would miss, naming the case-file section it comes from.
-A finding that passes the checks (every number in the evidence, a section
-named, no reliance on ThreatFox confidence) goes into the core report: a
-sentence in the summary, a labelled paragraph in the behaviour analysis, and
-"check the agent's finding" as the next step, with the case marked for review.
-A finding that fails the checks is left out of the report but still marks the
-case for review, with the finding and the reason shown to the reviewer.
-`eval/run_eval.py` lists every finding, so you can judge whether a model finds
-real edge cases or adds noise.
+- the model's verdict differs from the baseline;
+- the report quotes a number that is in neither the case file nor a tool
+  result (charts' data summaries count as tool results);
+- it claims exfiltration with no flow over the threshold, says the IP is not
+  shared when the evidence says it is, or its headline says "does not match"
+  but escalates;
+- it talks about itself or how it was made (an agent, a model, "I", the case
+  file, step numbers): the report is for the security team;
+- the report is missing or incomplete (the code-written summary is shown
+  instead).
 
-**Self-check.** After its first answer, the model gets the answer back with a
-proofreading checklist (numbers in the evidence, verdict consistent with its
-reasoning, benign and malicious explanations weighed, remaining risk named,
-host role backed by evidence, no reliance on ThreatFox confidence) plus any
-problems code found in it, and returns a corrected answer. The checks never
-reveal the rules' verdict, so the review stays blind. One pass by default
-(`MODEL_REFINE_ROUNDS`, 0 to turn off); thinking models such as `qwen3.5:9b`
-benefit most.
+`eval/run_eval.py` reports how often the model agrees with the rules.
+
+**Self-check.** After its first report, the model gets it back with a
+proofreading checklist (numbers in the evidence, verdict consistent with the
+assessment, benign and malicious explanations weighed, remaining risk named,
+host role backed by evidence, no reliance on ThreatFox confidence, 1-3 charts
+placed, all four parts present, no SQL in the text, next steps given) plus
+any problems code found, and may use the tools
+again (e.g. to fix a chart) before returning the corrected report. The checks
+never reveal the rules' verdict. One pass by default (`MODEL_REFINE_ROUNDS`, 0
+to turn off).
 
 ### Cross-case links
 
@@ -135,9 +153,11 @@ campus hosts used it and when it first appeared.
   duplicate is not assessed again, and one card covers both addresses.
 - Each card gives one action: close it or review it, never both.
 
-### Follow-up tools the model can call
+### Tools the model can call
 
-All are bound to the case's host in code.
+All are bound to the case's host in code. The model is encouraged to query
+wherever the case file leaves a question open or a point in its report needs
+checking.
 
 | Tool | Use |
 |---|---|
@@ -145,8 +165,60 @@ All are bound to the case's host in code.
 | `host_baseline(days)` | The host's normal daily volume, destinations and active hours |
 | `compare_sessions(date_a, date_b)` | The host's traffic with the flagged IP on two dates |
 | `run_sql(sql)` | Anything else: SELECT only, the tables in `docs/schema.md`, must filter on the host or a flagged server IP and a time column within the table's span (5 days per-minute, 30 days 5-minute, 90 days hourly), 50-row cap |
+| `add_chart(title, sql, kind, x, y, ...)` | A chart for the report: the same SQL rules as `run_sql`, up to 2000 rows; `line` (time on x, up to 3 lines from y columns or a `series` column) or `bar` (one bar per row, up to 25; the case's host is highlighted). At most 3 per case; the model places each with `[[chart N]]` |
 
-Up to `MAX_TOOL_ROUNDS` (default 4) rounds per case. Every call is logged in the report.
+Up to `MAX_TOOL_ROUNDS` (default 12) rounds per case, several calls per round.
+Every call is logged under the case in the report.
+
+**Charts.** The model chooses 1-3 charts and places them in its text. Small
+models rarely call tools, so most charts need none: the case file ends with
+**ready-made charts** built from data the evidence step already fetched, each
+with its key values, and the model places one by writing `[[chart host_load]]`:
+
+| Chart | Shows |
+|---|---|
+| `contact` | Upload and download between the host and the flagged address over time |
+| `host_load` | The host's total hourly traffic over two weeks, with the flagged contact marked |
+| `sites_on_ip` | Every site seen on the flagged address by campus hosts, the host's own highlighted |
+| `campus_hosts` | Campus hosts with large flows to the flagged address, this host highlighted |
+| `destinations` | The host's busiest other destinations |
+| `apps` | The host's traffic by app category |
+| `host_vs_type` | Where the host sits among measured hosts of its type, per feature (needs built profiles) |
+
+Each appears only when there is enough data. For anything else the model can
+make its own with `add_chart`. If a report places no chart, the most telling
+ready-made one is added to the Analysis. Charts are drawn as self-contained
+SVG (`agent/charts.py`): no chart library or internet needed, light and dark
+themes, a hover tooltip per point, and the data and source under each figure.
+
+### Host type and its typical behaviour
+
+Step 7b asks what kind of machine the host is, and whether it behaves like
+one (`agent/host_type.py`, `host_classification/`). The host's own traffic
+over the 7 days before the match (`HOST_TYPE_WINDOW_DAYS`) is turned into the
+same features used campus-wide: volume and upload share, night-vs-day
+volume, large-flow peers, ports, protocols and port groups, and how many apps
+it uses. A random forest trained on hand-verified seed hosts labels it
+(end host, NAT gateway, web server, web proxy, remote computing server, other
+TCP server), or transparent rules do until a forest is trained. Each key
+feature is then placed on its type's measured range (5th-95th percentile),
+or on rough priors from `knowledge.py` until profiles are built.
+
+The case file gives the model the type and how sure it is, which features
+are unusual for the type, and from `knowledge.HOST_TYPE_PROFILES` what is
+typical, what would be abnormal, what compromise looks like for that type,
+and how to read an IOC match from it. For example, a match from a NAT gateway
+means some device behind it made the contact. When measured profiles exist,
+a ready-made chart shows where the host sits on each feature.
+
+Build the classifier and profiles once (and again when the seeds change):
+
+```bash
+pip install scikit-learn
+python -m host_classification build --start 2026-09-24 --end 2026-10-01
+```
+
+See [host_classification/README.md](host_classification/README.md).
 
 ## Layout
 
@@ -163,12 +235,15 @@ agent/
   schema.py          verified table descriptions: the model's schema card and docs/schema.md
   data/applications.json  SuperNetFlow app categories: benign, neutral, remote access, VPN/privacy relay
   behaviour.py       behaviour category (tunnelling, beaconing, web on shared infrastructure, ...)
-  narrative.py       the report's three paragraphs, written from the evidence
+  host_type.py       classifies the case's host and compares it with its type (uses host_classification/)
+  charts.py          add_chart: model-chosen charts, checked like run_sql, drawn as SVG
+  mdrender.py        the model's Markdown report as HTML (escaped; [[chart N]] becomes the figure)
   domain_features.py offline domain/IP features (registered domain, shared ASNs, DGA-like)
   knowledge.py       threat type, malware, service and shared-infrastructure profiles
   casefile.py        renders the evidence as the text the model reads
   llm_client.py      Ollama / OpenRouter client with a small tool loop
-  report.py          HTML overview and per-case Markdown reports
+  report.py          the HTML report and per-case Markdown reports
+host_classification/ host types: feature extraction, seed-trained classifier, per-type profiles (see its README)
 data/sample/         fake feed in the real format, safe to publish
 eval/                expected-verdict evaluation (run_eval.py; example file with fake IPs)
 ```
@@ -214,11 +289,14 @@ budget). On a machine with less memory, `qwen2.5:7b` also works (4.7 GB; leave
 supports tool calls works too; set `OLLAMA_MODEL` to it. The code is the same
 for every model.
 
-The agent asks Ollama for a 24k-token context (`OLLAMA_NUM_CTX`): the system
-prompt plus a case file measured 8-11k tokens, and follow-up tool results add
-more. Ollama's 4k default is far too small and silently cuts off the start of
-the prompt; a case whose prompt comes within 5% of the limit is marked for
-review.
+The model now writes the whole report and runs its own queries, so a larger
+model than these does noticeably better; any model with tool calling works.
+The agent asks Ollama for a 32k-token context (`OLLAMA_NUM_CTX`): the system
+prompt (about 3.5k tokens) plus a case file (8-11k) and the model's own query
+results. Ollama's 4k default is far too small and silently cuts off the start
+of the prompt; a case whose prompt comes within 5% of the limit is marked for
+review. A reply may use up to `MAX_TOKENS` (default 8000) and each request
+waits up to `LLM_TIMEOUT_SEC` (default 900 s).
 
 ### Optional: OpenRouter
 
@@ -331,18 +409,19 @@ python eval/run_eval.py --from-output output/assessments.json   # compare a save
 
 ## Outputs
 
-- `output/cases/<indicator>__<host>.md`: one short report per case in three
-  paragraphs: **Summary** (host and name, the flagged indicator, what the match
-  would usually mean, what the flow data shows, the verdict and whether the
-  rule-based baseline agrees, and any risk that remains), **Behaviour
-  analysis** (the workflow steps: which name the host used on the flagged IP,
-  the flows, the comparison with a real victim, the host's other traffic and
-  likely role, other hosts on the IP) and **Conclusion and next steps**.
-  Next to it, `<indicator>__<host>.casefile.txt` holds the evidence the model saw.
-- `output/report.html`: the same paragraphs as one card per case, worst first,
-  with the behaviour category and a "human review" marker; the agent's own
-  judgement, the case file and tool calls are folded away for reviewers.
-- `output/assessments.json`: everything, for reuse.
+- `output/report.html`: the IOC Investigation Report. An overview (counts per
+  verdict, a filterable case index with each case's one-line finding), then one
+  section per case, worst first: the verdict, confidence, behaviour category,
+  whether the rule-based cross-check agrees, key facts (host, indicator,
+  ThreatFox listing, matched evidence, flagged address, likely role), why it
+  needs review if it does, and the written report with its figures. Folded
+  away under each case: the rule-based summary for comparison, every query the
+  agent ran, the case file, and the self-check.
+- `output/cases/<indicator>__<host>.md`: the same report as Markdown, with its
+  charts next to it as `<indicator>__<host>.chartN.svg` and the evidence the
+  model saw as `<indicator>__<host>.casefile.txt`.
+- `output/assessments.json`: everything, for reuse (`eval/run_eval.py
+  --from-output` re-applies the code checks without calling the model).
 
 **Outputs contain real internal IP addresses and per-host activity, including
 personal devices.** They are gitignored. Do not share them outside the team.
@@ -361,10 +440,12 @@ personal devices.** They are gitignored. Do not share them outside the team.
 - **Heuristic thresholds.** Rare (at most 1 campus host in 5 days), popular,
   DGA-like and exfiltration thresholds are judgement calls, set in
   `agent/config.py`, `agent/signals.py` and `agent/domain_features.py`.
-- **Small models make mistakes.** Verdicts are a first-pass triage. Read the
-  case file before acting. When there is no traffic for a case, the traffic
-  fields are replaced with fixed text, because small models were found to
-  invent SNI, ASN and byte counts.
-- `run_sql` guardrails (SELECT only, allowed tables, must filter on the case's
-  host and a time column, 50-row cap) stop unsafe or unbounded queries, not
-  wrong ones.
+- **Models make mistakes.** The report is a first assessment, not proof:
+  code checks its numbers and claims against the evidence, but cannot check
+  its reasoning. Read the case file before acting on a review-marked case.
+  When there is no traffic for a case, the model is not called, because small
+  models were found to invent SNI, ASN and byte counts.
+- The `run_sql` and `add_chart` guardrails (SELECT only, allowed tables, must
+  filter on the case's host or flagged IP and a time column, row caps) stop
+  unsafe or unbounded queries, not wrong ones. A chart can still plot the
+  wrong thing; its query is shown under it.

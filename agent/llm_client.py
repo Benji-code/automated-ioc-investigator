@@ -80,7 +80,7 @@ def _call_ollama(messages: list[dict], tools: list[dict] | None, model: str | No
     headers = {}
     if config.OLLAMA_API_KEY:
         headers["Authorization"] = f"Bearer {config.OLLAMA_API_KEY}"
-    response = requests.post(config.OLLAMA_API_URL, headers=headers, json=payload, timeout=300)
+    response = requests.post(config.OLLAMA_API_URL, headers=headers, json=payload, timeout=config.LLM_TIMEOUT_SEC)
     response.raise_for_status()
     data = response.json()
     if "error" in data:
@@ -130,7 +130,7 @@ def _call_once(messages: list[dict], tools: list[dict] | None, model: str | None
         "HTTP-Referer": config.SITE_URL,
         "X-Title": config.SITE_NAME,
     }
-    response = requests.post(config.api_url(), headers=headers, json=payload, timeout=120)
+    response = requests.post(config.api_url(), headers=headers, json=payload, timeout=config.LLM_TIMEOUT_SEC)
 
     if response.status_code == 429 and "free-models-per-day" in response.text:
         reset_ms = response.headers.get("X-RateLimit-Reset")
@@ -209,22 +209,24 @@ def chat(messages: list[dict], max_tokens: int | None = None) -> str:
 def run_agent(messages: list[dict], tools: list[dict] | None = None,
               tool_executor: Callable[[str, dict], dict] | None = None,
               model: str | None = None, temperature: float | None = None,
-              max_tokens: int | None = None) -> tuple[str, list[dict]]:
-    """Run a short tool-calling loop and return (final_reply_text, tool_call_trace).
+              max_tokens: int | None = None, max_rounds: int | None = None,
+              reset_prompt_count: bool = True) -> tuple[str, list[dict], list[dict]]:
+    """Run a tool-calling loop. Returns (final reply text, tool-call trace,
+    the whole conversation including tool results and the final reply).
 
-    Capped at config.MAX_TOOL_ROUNDS round-trips; the final round drops the
-    `tools` param so the model has to answer in plain text. The case file
-    already holds the must-run evidence, so follow-up calls are the model's
-    own choice.
+    Capped at max_rounds (default config.MAX_TOOL_ROUNDS) round-trips; the
+    final round drops the `tools` param so the model has to answer in text.
     """
     global max_prompt_tokens
-    max_prompt_tokens = 0
+    if reset_prompt_count:
+        max_prompt_tokens = 0
     budget = max_tokens or config.MAX_TOKENS
+    rounds = config.MAX_TOOL_ROUNDS if max_rounds is None else max_rounds
     working_messages = list(messages)
     trace: list[dict] = []
 
-    for round_i in range(config.MAX_TOOL_ROUNDS + 1):
-        is_final_round = round_i == config.MAX_TOOL_ROUNDS
+    for round_i in range(rounds + 1):
+        is_final_round = round_i == rounds
         offer_tools = tools if (tools and tool_executor and not is_final_round) else None
 
         message = _call_with_retry(working_messages, offer_tools, model, temperature, budget)
@@ -250,6 +252,7 @@ def run_agent(messages: list[dict], tools: list[dict] | None = None,
 
         content = message.get("content")
         if content:
-            return content, trace
+            working_messages.append({"role": "assistant", "content": content})
+            return content, trace, working_messages
 
     raise RuntimeError("model never produced a final text answer within the tool-call round limit")

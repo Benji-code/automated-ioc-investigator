@@ -16,9 +16,9 @@ file before the model sees it:
   indicator_peers      step 8  other internal hosts contacting the flagged IP
 
 Open-ended follow-ups are left to the model: timeline_around, host_baseline,
-compare_sessions and run_sql. All are bound to the case's host in code, so
-the model cannot point them at another host. run_sql's safety lives in
-db.run_sql, not the prompt.
+compare_sessions, run_sql, and add_chart for the report's charts. All are
+bound to the case's host in code, so the model cannot point them at another
+host. The SQL guardrails live in db.check_sql, not the prompt.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
-from . import analysis, beacon, config, db, domain_features as dfeat, evidence, knowledge
+from . import analysis, beacon, charts as chart_tools, config, db, domain_features as dfeat, evidence, knowledge
 from .evidence import CaseWindow
 
 MAX_PEER_IPS = 3  # peer lookups per case, for indicators that map to several IPs
@@ -75,12 +75,12 @@ TOOL_SPECS = [
             "name": "run_sql",
             "description": (
                 "Run a read-only SQL query against ClickHouse for anything the case file "
-                "doesn't already cover - e.g. one specific flow, one hour, or one destination "
-                "in the host's other traffic. The schema card in the system prompt describes "
-                "the two tables. Must be a SELECT, must reference one of those tables, and "
-                "must filter on this case's client_ip and a time column; otherwise it is "
-                "rejected with an error explaining why. Keep subscriber_activity_1m queries "
-                "to 5 days or less. Results are capped at 50 rows."
+                "doesn't already cover - e.g. one specific flow, one hour, one destination "
+                "in the host's other traffic, or other campus hosts on a flagged server_ip. "
+                "The schema card in the system prompt describes the tables. Must be a SELECT, "
+                "must reference one of those tables, and must filter on this case's client_ip "
+                "or a flagged server_ip and a time column within the table's span; otherwise "
+                "it is rejected with an error explaining why. Results are capped at 50 rows."
             ),
             "parameters": {
                 "type": "object",
@@ -91,13 +91,20 @@ TOOL_SPECS = [
             },
         },
     },
+    chart_tools.SPEC,
 ]
 
 
-def execute(name: str, arguments: dict, *, client_ip: str, server_ips: list[str] | None = None) -> dict:
+def execute(name: str, arguments: dict, *, client_ip: str, server_ips: list[str] | None = None,
+            charts: list[dict] | None = None) -> dict:
     """Run a model-callable tool, always for this case's host. A failure
-    becomes a normal result the model can reason about, not a crash."""
+    becomes a normal result the model can reason about, not a crash.
+    add_chart stores its chart in `charts` (one list per case)."""
     try:
+        if name == "add_chart":
+            if charts is None:
+                return {"error": "charts are not available here"}
+            return chart_tools.add_chart(arguments, client_ip=client_ip, server_ips=server_ips or [], charts=charts)
         if name == "run_sql":
             sql = str(arguments.get("sql", "")).strip()
             if not sql:
@@ -120,6 +127,8 @@ def describe_call(call: dict) -> str:
     args = call.get("arguments", {})
     if call.get("tool") == "run_sql":
         return "run_sql"
+    if call.get("tool") == "add_chart":
+        return f"add_chart: {args.get('title', '')}"
     return f"{call.get('tool')}({', '.join(f'{k}={v}' for k, v in args.items())})"
 
 
@@ -695,6 +704,25 @@ def _minutes(start: datetime, end: datetime) -> float:
     return (end - start).total_seconds() / 60
 
 
+MAX_SERIES_POINTS = 400  # series kept for charts: coarsened to hours, then days, beyond this
+
+
+def series_rows(frame: pd.DataFrame, bin_minutes: int) -> dict:
+    """A traffic series kept in the evidence for the report's charts:
+    [time, up bytes, down bytes] rows, coarsened when long."""
+    if frame is None or frame.empty or not {"time", "up_bytes", "down_bytes"} <= set(frame.columns):
+        return {"bucket": None, "rows": []}
+    data = frame.assign(time=pd.to_datetime(frame["time"], utc=True))[["time", "up_bytes", "down_bytes"]]
+    bucket = f"{bin_minutes}min"
+    for freq, label in (("h", "hour"), ("D", "day")):
+        if len(data) <= MAX_SERIES_POINTS or bucket == label:
+            break
+        data = data.groupby(data["time"].dt.floor(freq))[["up_bytes", "down_bytes"]].sum().reset_index()
+        bucket = label
+    return {"bucket": bucket,
+            "rows": [[t.isoformat(), int(up), int(down)] for t, up, down in data.itertuples(index=False)]}
+
+
 def beacon_analysis(host: str, server_ips: list[str], port: int | None, window: CaseWindow,
                     case_rows: list[dict] | None = None) -> dict:
     """Contact pattern with the flagged IP from per-minute data
@@ -711,17 +739,20 @@ def beacon_analysis(host: str, server_ips: list[str], port: int | None, window: 
         if not frame.empty:
             result = beacon.analyse(frame, 1, _minutes(window.activity_start, end), "subscriber_activity_1m")
             result["window"] = f"{window.activity_start:%Y-%m-%d} to {end:%Y-%m-%d}"
+            result["series"] = series_rows(frame, 1)
             return result
     end = min(window.flow_end, now)
     frame = db.fetch_contact_series_5m(host, server_ips, window.flow_start, end)
     if not frame.empty:
         result = beacon.analyse(frame, 5, _minutes(window.flow_start, end), "app_subscriber_server_enriched_5m")
         result["window"] = f"{window.flow_start:%Y-%m-%d} to {end:%Y-%m-%d}"
+        result["series"] = series_rows(frame, 5)
         result["note"] = ("past subscriber_activity_1m's 15-day retention, so the 5-minute table was used; it only "
                           "holds traffic SuperNetFlow labelled as an app")
         return result
     feed = evidence.feed_minutes(case_rows or [], server_ips)
     result = beacon.analyse(feed, 1, max(len(feed), 1), "IOC feed")
+    result["series"] = series_rows(feed, 1)
     result["note"] = ("per-minute data has expired and the 5-minute table has no labelled traffic to the IP, so "
                       "this uses only the feed's own matched minutes, not re-queried: it cannot show a pattern "
                       "outside those minutes")
@@ -894,6 +925,7 @@ def host_load_baseline(host: str, identity: dict) -> dict:
     result = {"period": f"{start:%Y-%m-%d} to {end:%Y-%m-%d}", "sources": "subscriber_ip_load_enriched_1h"}
     if frame.empty:
         return result
+    result["series"] = series_rows(frame, 60)
     stamps = pd.to_datetime(frame["time"])
     stamps = stamps.dt.tz_localize("UTC") if stamps.dt.tz is None else stamps
     local_hour = stamps.dt.tz_convert(config.LOCAL_TIMEZONE).dt.hour

@@ -1,1 +1,1 @@
-"""IOC triage agent: evidence gathering, analysis and reporting."""
+"""IOC investigation agent: evidence gathering, analysis and reporting."""

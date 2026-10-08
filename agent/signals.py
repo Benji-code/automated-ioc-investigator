@@ -456,3 +456,30 @@ def _false_positive_confidence(signals: list[dict], against: list[str]) -> str:
 
 def _verdict(verdict: str, confidence: str, rule: int, reason: str) -> dict:
     return {"verdict": verdict, "confidence": confidence, "rule": rule, "reason": reason}
+
+
+UPLOAD_NOTABLE_BYTES = 1_000_000  # more than this sent, and more sent than received, counts as uploading
+
+
+def substantial_contact(ev: dict) -> str | None:
+    """Why the host's own traffic to the flagged IP is more than a single
+    browsing visit: repeated contact, non-web traffic or uploads. None for
+    one short visit, which a linked domain alone does not make suspicious."""
+    from .analysis import fmt_bytes
+
+    flows = ev.get("flows", {}) or {}
+    if "error" in flows:
+        return None
+    f = (ev.get("contact") or {}).get("features", {}) or {}
+    days = len(_active_days(flows))
+    bursts = f.get("bursts") or 0
+    if bursts >= 3 or days >= 2:
+        return (f"repeated contact ({bursts} burst{'' if bursts == 1 else 's'} over "
+                f"{max(days, 1)} day{'' if max(days, 1) == 1 else 's'})")
+    non_web = sorted({p for p, _ in _ports(flows) if p not in (80, 443)})
+    if non_web:
+        return f"non-web traffic (port {', '.join(str(p) for p in non_web)})"
+    up, down = _total_bytes(flows)
+    if (flows.get("notable") or {}).get("upload_heavy_total") or (up >= UPLOAD_NOTABLE_BYTES and up > down):
+        return f"uploads ({fmt_bytes(up)} sent, {fmt_bytes(down)} received)"
+    return None

@@ -5,7 +5,7 @@ so the model (and a reviewer reading the saved case file) can trace it.
 """
 from __future__ import annotations
 
-from . import config, schema
+from . import charts, config, schema
 from .analysis import fmt_bytes, fmt_duration
 
 LFS = "long_flow_summary"
@@ -367,6 +367,7 @@ Window: {LFS} {window['long_flow_summary']}; {SA} {window['subscriber_activity_1
   Long-lived flows (1 hour or longer) to other IPs ({LFS}):
 {long_lived}
   Root domains contacted, busiest first ({SA}, {other['distinct_root_domains']} distinct): {domains}
+  Activity types from ALL its root domains (not only the busiest listed above): {_activity_text(other.get('activity_hints') or {})}
   Operating-system hints from those domains: {_platform_text(other.get('platform_hints') or {})}
   {uptime_text(other.get('uptime') or {})} (subscriber_ip_load_enriched_1h)"""
 
@@ -395,6 +396,12 @@ def _retention_line(flows: dict) -> str:
         return ""
     return (f"\n  NOTE: long_flow_summary now only holds flows that finished on or after {cut}, and this host's "
             "activity reaches that edge, so earlier activity may be missing.")
+
+
+def _activity_text(hints: dict) -> str:
+    if not hints:
+        return "(none)"
+    return "; ".join(f"{label}: {', '.join(domains[:4])}" for label, domains in hints.items())
 
 
 def _platform_text(hints: dict) -> str:
@@ -601,6 +608,57 @@ def _other_matches_section(other_matches: list[dict]) -> str:
     return f"THIS HOST'S OTHER IOC MATCHES (from the feed):\n{body}"
 
 
+def _host_type_section(result: dict | None) -> str:
+    title = "[STEP 7b] HOST TYPE AND ITS TYPICAL BEHAVIOUR (host classification)"
+    if not result:
+        return f"{title}: not run\n\n"
+    if "error" in result:
+        return f"{title}: could not be worked out ({result['error'][:200]})\n\n"
+    if not result.get("label"):
+        return f"{title} ({result.get('period', '')}): {result.get('note', 'no classification')}\n\n"
+    from .host_type import fmt_feature
+
+    lines = [f"{title}, from the host's own traffic {result['period']}:",
+             f"  Classified as: {result['name']} [{result['label']}], confidence {result['confidence']:.2f}, "
+             f"by {result['method']}"]
+    others = {k: v for k, v in (result.get("alternatives") or {}).items() if k != result["label"]}
+    if others:
+        lines.append("  Other possible types: " + ", ".join(f"{k} {v:.2f}" for k, v in others.items()))
+    lines.append(f"  Rule-based reading: {result['rule_label']} ({result['rule_reason']})")
+    if result.get("hostname_hint"):
+        lines.append(f"  Host-name hint (weak): {result['hostname_hint']}")
+    ports = result.get("top_ports") or []
+    lines.append(f"  Most used remote ports in its large flows: {', '.join(map(str, ports)) or 'none'}")
+    comparison = result.get("comparison") or {}
+    lines.append(f"  Compared with typical hosts of this type ({comparison.get('source', 'no profile')}):")
+    for row in comparison.get("rows", []):
+        span = f"{fmt_feature(row['typical_low'], row['unit'])} to {fmt_feature(row['typical_high'], row['unit'])}"
+        where = f", {row['percentile']}th percentile" if row.get("percentile") is not None else ""
+        flag = "" if row["position"] == "typical" else f"  <-- {row['position'].upper()}"
+        lines.append(f"    - {row['description']}: {fmt_feature(row['value'], row['unit'])} "
+                     f"(typical {span}{where}){flag}")
+    unusual = comparison.get("unusual") or []
+    lines.append("  Unusual for this type: " + ("; ".join(r["description"] for r in unusual) if unusual
+                                                else "nothing outside the typical range"))
+    profile = result.get("profile") or {}
+    lines.append("  Typical for this type: " + "; ".join(profile.get("typical") or []))
+    if profile.get("abnormal"):
+        lines.append("  Would be abnormal for this type: " + "; ".join(profile["abnormal"]))
+    if profile.get("compromise"):
+        lines.append(f"  What compromise of this type looks like: {profile['compromise']}")
+    if profile.get("ioc_reading"):
+        lines.append(f"  Reading an IOC match from this type: {profile['ioc_reading']}")
+    return "\n".join(lines) + "\n\n"
+
+
+def _charts_section(options: list[dict]) -> str:
+    if not options:
+        return "READY-MADE CHARTS: none (too little data); use add_chart for your own.\n\n"
+    lines = "\n".join(f"  - {charts.describe(c)}" for c in options)
+    return ("READY-MADE CHARTS (built from the evidence above; place 1-3 in the report, each on its own line, "
+            f"e.g. [[chart {options[0]['id']}]]):\n{lines}\n\n")
+
+
 DATA_LIMITATIONS = [
     "Flow data only: no payloads, so the content of any session is unknown.",
     "long_flow_summary only holds flows over a size/duration threshold; short flows are missing.",
@@ -619,7 +677,7 @@ def build_case_file(ev: dict, blind: bool = False) -> str:
     limitations = "\n".join(f"  - {item}" for item in DATA_LIMITATIONS)
     conclusions = "" if blind else _signals_section(ev) + "\n\n"
     return f"""CASE FILE
-Steps 1-5, 7 and 8 were gathered automatically just now. Your job: steps 6 and 9.
+The evidence below was gathered automatically just now (steps 1-5, 7 and 8 of the workflow).
 ThreatFox confidence rates the indicator, not this host.
 
 {_ioc_section(ev['identity'], ev.get('host'))}
@@ -641,6 +699,7 @@ ThreatFox confidence rates the indicator, not this host.
 {_other_traffic_section(ev['other_traffic'])}
 {_load_section(ev.get('load') or {})}
 
+{_host_type_section(ev.get('host_type'))}
 {_dns_section(ev.get('dns') or {"present": False})}
 
 {_peers_section(ev['peers'], ev['shared'])}
@@ -652,6 +711,6 @@ ThreatFox confidence rates the indicator, not this host.
 DATA LIMITATIONS (always true for this data):
 {limitations}
 
-{conclusions}If something above doesn't answer what you need, use a follow-up tool. \
-Otherwise, answer now using the evidence above.
+{_charts_section(ev.get('chart_options') or [])}{conclusions}Investigate anything this leaves open with the tools, \
+then reply in the format from the instructions: the header fields, then the report in its four parts.
 """

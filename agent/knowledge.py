@@ -308,6 +308,160 @@ SHARED_ASNS: dict[str, dict] = {
 
 # Dynamic DNS providers (registered domains). NanoCore and other commodity
 # RATs often use these for C2, so a hit is a threat signal.
+# --- host types (host_classification/) -----------------------------------------------
+# What each kind of campus host normally does, what would stand out for it,
+# and how to read an IOC match from it. "priors" are rough typical ranges for
+# the features in host_classification/profiles.py, used only until measured
+# per-type profiles are built (python -m host_classification build); they are
+# judgement calls, loosely informed by the seed hosts. SuperNetFlow records
+# flows from the campus host's side, so "serving" shows as sending more than
+# receiving, to many addresses, not as inbound connections.
+
+HOST_TYPE_PROFILES: dict[str, dict] = {
+    "end_host": {
+        "name": "end host (workstation, laptop or personal device)",
+        "typical": [
+            "acts as a client: it connects out and almost never answers inbound connections",
+            "mostly web traffic (HTTPS, QUIC) to many popular services, few distinct server ports",
+            "downloads far more than it uploads",
+            "busiest in waking hours; laptops and phones come and go, a desktop left on keeps a low background",
+        ],
+        "abnormal": [
+            "answering inbound connections, especially on non-web ports (something is listening or tunnelled in)",
+            "regular small check-ins around the clock to one unpopular destination (beaconing)",
+            "sustained heavy upload to one external host",
+            "connections to many ports or many addresses in a short time (scanning)",
+            "remote-access or tunnelling traffic it does not otherwise use",
+        ],
+        "compromise": ("An infected workstation beacons to its controller (regular small check-ins, or one "
+                       "held connection to an odd port), fetches further payloads, and may upload stolen data."),
+        "ioc_reading": "The host itself made the contact, so its own traffic pattern is the evidence.",
+        "priors": {"client_up_byte_ratio": (0.0, 0.3), "load_up_byte_ratio": (0.0, 0.3),
+                   "client_unique_ports": (0, 15), "client_remote_flows_ratio": (0.0, 0.05),
+                   "client_database_flows_ratio": (0.0, 0.05)},
+    },
+    "NAT_gateway": {
+        "name": "NAT gateway (one address shared by many devices)",
+        "typical": [
+            "online every hour of every day, carrying many users at once",
+            "a very wide mix of apps, server ports and destinations, over TCP and UDP",
+            "high, fairly steady volume that follows the day of the people behind it",
+        ],
+        "abnormal": [
+            "little can stand out per device: one device's beaconing is buried in everyone's traffic",
+            "a sudden new destination, port or volume spike against its usual mix is the most it shows",
+        ],
+        "compromise": "Any one of the devices behind it could be infected; flow data cannot say which.",
+        "ioc_reading": ("A match means some device behind the gateway made the contact, not the gateway "
+                        "itself. Its other traffic describes the whole population, not the culprit. Finding "
+                        "the device needs the gateway's translation logs for the match time and source port."),
+        "priors": {"client_unique_peers": (150, 100000), "app_unique_apps": (80, 100000),
+                   "load_up_byte_ratio": (0.0, 0.3)},
+    },
+    "website_server": {
+        "name": "web server",
+        "typical": [
+            "answers HTTP(S) from many clients, so it sends far more than it receives, to many addresses",
+            "online around the clock",
+            "connects out only for updates, package mirrors, APIs and certificate checks",
+        ],
+        "abnormal": [
+            "connections it starts itself to unusual ports or rare destinations",
+            "long-held outbound sessions, or large uploads to a single external host",
+            "outbound traffic to mining pools, tunnels or remote-access services",
+        ],
+        "compromise": ("An exploited web application or web shell makes the server call out: a reverse "
+                       "shell or C2 channel to the attacker, tool downloads, mining, or data copied out."),
+        "ioc_reading": ("A server rarely starts contact with arbitrary internet hosts, so an outbound match "
+                        "weighs more than it would for a workstation. An inbound connection from a flagged "
+                        "address is more likely scanning or an attack attempt against the server."),
+        "priors": {"client_up_byte_ratio": (0.5, 1.0)},
+    },
+    "web_proxy": {
+        "name": "web proxy",
+        "typical": [
+            "very many HTTPS flows with hundreds of addresses on one or two ports; on this network the "
+            "hosts labelled as proxies send almost all of their large-flow bytes",
+            "online around the clock, with the daily rhythm of its users",
+        ],
+        "abnormal": [
+            "traffic on non-web ports, or long outbound sessions that are not web fetches",
+        ],
+        "compromise": "Usually a user's request passing through; the proxy itself is rarely the infected party.",
+        "ioc_reading": ("The proxy fetched the flagged address for some client. The proxy's own logs for the "
+                        "match time say which client and which URL."),
+        "priors": {"client_web_https_flows_ratio": (0.8, 1.0), "client_unique_ports": (0, 5)},
+    },
+    "remote_computing_server": {
+        "name": "remote computing server (SSH, RDP or VNC login host)",
+        "typical": [
+            "answers remote-access connections (22, 3389, 5900) from users",
+            "users run their own jobs, so outbound traffic is varied: code repositories, package mirrors, datasets",
+            "often online around the clock",
+        ],
+        "abnormal": [
+            "outbound connections to tunnels, mining pools or remote-access services",
+            "many inbound logins from one external address (brute force) followed by new outbound traffic",
+            "outbound scanning of other hosts",
+        ],
+        "compromise": ("A stolen or guessed login gives an attacker a shell: they mine, scan, tunnel out, or "
+                       "use it as a stepping stone. Flow data shows the outbound effects, not the login."),
+        "ioc_reading": ("Many users share it, so any user's process may have made the contact; login records "
+                        "for the match time narrow it down."),
+        "priors": {"client_remote_flows_ratio": (0.05, 1.0)},
+    },
+    "non_typical_tcp_server": {
+        "name": "server for another TCP service (e.g. a database)",
+        "typical": [
+            "answers one service port (for example 5432 or 3306) from a small set of clients",
+            "little outbound traffic beyond updates",
+        ],
+        "abnormal": [
+            "any outbound connection to an unfamiliar external host",
+            "large uploads (data copied out)",
+            "the service answering clients from outside its usual set",
+        ],
+        "compromise": ("An exposed or exploited service is used to run commands: outbound callbacks, tool "
+                       "downloads, or bulk copies of the data it holds."),
+        "ioc_reading": "Outbound contact from a service host is unusual and weighs heavily.",
+        "priors": {"client_unique_ports": (0, 10)},
+    },
+    "mail_server": {
+        "name": "mail server",
+        "typical": ["SMTP, IMAP and POP traffic in both directions, with many external mail servers"],
+        "abnormal": ["non-mail outbound traffic, or a sudden surge of outbound SMTP (spam)"],
+        "compromise": "Relaying spam, or outbound callbacks from an exploited mail service.",
+        "ioc_reading": "Mail servers talk to many external hosts; a flagged mail server address is often a sender.",
+        "priors": {},
+    },
+    "dns_server": {
+        "name": "DNS server",
+        "typical": ["answers DNS (53) for many clients and asks many external servers"],
+        "abnormal": ["non-DNS traffic, or unusually large or frequent answers (tunnelling, amplification)"],
+        "compromise": "Abused for amplification, or DNS tunnelling through it.",
+        "ioc_reading": "It resolves for everyone, so contact with a flagged name may be on behalf of any client.",
+        "priors": {},
+    },
+}
+
+DEFAULT_HOST_TYPE_PROFILE = {
+    "name": "unknown type",
+    "typical": ["no profile: the classification could not place this host"],
+    "abnormal": [],
+    "compromise": "",
+    "ioc_reading": "Judge the host on its own traffic.",
+    "priors": {},
+}
+
+# Host types whose job includes answering connections or staying on all day.
+SERVER_HOST_TYPES = {"website_server", "web_proxy", "remote_computing_server", "non_typical_tcp_server",
+                     "mail_server", "dns_server", "NAT_gateway"}
+
+
+def host_type_profile(label: str | None) -> dict:
+    return HOST_TYPE_PROFILES.get(label or "", DEFAULT_HOST_TYPE_PROFILE)
+
+
 DYNAMIC_DNS_DOMAINS = (
     "duckdns.org", "no-ip.com", "no-ip.org", "no-ip.biz", "no-ip.info", "noip.com", "ddns.net",
     "hopto.org", "zapto.org", "sytes.net", "serveftp.com", "servehttp.com", "myftp.biz",

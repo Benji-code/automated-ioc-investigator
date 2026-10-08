@@ -1,4 +1,4 @@
-"""Settings for the IOC triage agent.
+"""Settings for the IOC investigation agent.
 
 Everything secret or site-specific (ClickHouse host, user, password, API
 keys) comes from a `.env` file at the project root, never from code. Copy
@@ -67,10 +67,10 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")  # any locally pulled too
 # the reply budget; on may reason better but is much slower.
 _THINK = os.getenv("OLLAMA_THINK", "").strip().lower()
 OLLAMA_THINK = None if _THINK == "" else _THINK in ("1", "true", "yes", "on")
-# Context window in tokens. Measured (task 3): system prompt plus case file is
-# 8-11k tokens, and up to 4 tool rounds add more; Ollama silently drops the
-# START of a prompt that overflows. qwen2.5:7b supports 32k.
-OLLAMA_NUM_CTX = _int_env("OLLAMA_NUM_CTX", 24576)
+# Context window in tokens. The system prompt plus case file is 8-11k tokens,
+# and the model's own queries and charts add more; Ollama silently drops the
+# START of a prompt that overflows. Lower it for a model with a smaller window.
+OLLAMA_NUM_CTX = _int_env("OLLAMA_NUM_CTX", 32768)
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Free models rotate; check https://openrouter.ai/models?max_price=0 if every
@@ -79,18 +79,25 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a
 
 TEMPERATURE = 0.0  # identical evidence should give an identical answer
 SEED = 0           # Ollama: fixed sampling seed, for the same reason
-# Model-callable tool rounds per case (timeline_around, host_baseline,
-# compare_sessions, run_sql) before a final text answer is forced.
-MAX_TOOL_ROUNDS = _int_env("MAX_TOOL_ROUNDS", 4)
-# Self-check passes: the model gets its reply back with a proofreading
-# checklist and any problems code found, and returns a corrected answer.
-# 0 turns it off; each pass is one more model call per case.
+# Tool rounds per case (follow-up queries and charts) before a final text
+# answer is forced. A round can hold several calls.
+MAX_TOOL_ROUNDS = _int_env("MAX_TOOL_ROUNDS", 12)
+# Self-check passes: the model gets its report back with a proofreading
+# checklist and any problems code found, and returns a corrected report. It
+# may call tools again (e.g. to fix a chart). 0 turns it off.
 MODEL_REFINE_ROUNDS = _int_env("MODEL_REFINE_ROUNDS", 1)
-MAX_TOKENS = 3000  # reasoning models can spend much of this on hidden "thinking";
-                   # llm_client grows it on retry if a reply is cut off
+REFINE_TOOL_ROUNDS = 4
+# Reply budget: the model writes the whole report. Thinking models spend part
+# of it on hidden reasoning; llm_client grows it on retry if a reply is cut off.
+MAX_TOKENS = _int_env("MAX_TOKENS", 8000)
+# Seconds to wait for one model reply (a large local model writing a whole
+# report can take minutes).
+LLM_TIMEOUT_SEC = _int_env("LLM_TIMEOUT_SEC", 900)
+# Charts the model may add to one case's report (add_chart).
+MAX_CHARTS = 3
 
 SITE_URL = "https://github.com/local/ioc-triage-agent"
-SITE_NAME = "IOC Triage Agent"
+SITE_NAME = "IOC Investigation Agent"
 
 # --- ClickHouse (SuperNetFlow) ----------------------------------------------
 CLICKHOUSE_ENV_VARS = ("CLICKHOUSE_HOST", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD")
@@ -182,6 +189,21 @@ REVERSE_DNS_TIMEOUT_SEC = 3.0
 
 # Optional, gitignored: real ThreatFox fields pasted in by hand per IOC.
 IOC_METADATA_PATH = PROJECT_ROOT / "data" / "ioc_metadata.json"
+
+# --- Host classification (host_classification/) -------------------------------
+# The campus address range, for selecting campus hosts to profile (e.g.
+# 192.0.2.0/24). Site-specific, so it lives in .env.
+CAMPUS_CIDR = os.getenv("CAMPUS_CIDR", "").strip()
+# Everything derived from real hosts stays in data/ (gitignored): seed labels,
+# features, the trained model and the per-type profiles.
+HOST_CLASSIFICATION_DIR = PROJECT_ROOT / "data" / "host_classification"
+HOST_SEED_LABELS_PATH = HOST_CLASSIFICATION_DIR / "seed_labels.csv"
+HOST_FEATURES_PATH = HOST_CLASSIFICATION_DIR / "features.csv"
+HOST_LABELLED_PATH = HOST_CLASSIFICATION_DIR / "labelled.csv"
+HOST_MODEL_PATH = HOST_CLASSIFICATION_DIR / "model.joblib"
+HOST_PROFILES_PATH = HOST_CLASSIFICATION_DIR / "host_type_profiles.json"
+# Days of the case host's own traffic, up to the match, used to classify it.
+HOST_TYPE_WINDOW_DAYS = _int_env("HOST_TYPE_WINDOW_DAYS", 7)
 
 
 def clickhouse_settings() -> dict:

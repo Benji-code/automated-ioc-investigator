@@ -1,4 +1,4 @@
-"""Compare expected verdicts with the agent's baseline and model verdicts.
+"""Compare expected verdicts with the rule-based baseline and the agent's verdicts.
 
     python eval/run_eval.py                        # quick: one case per indicator, at most 6 (a few minutes)
     python eval/run_eval.py --all                  # every case with an expected verdict (slow)
@@ -105,7 +105,7 @@ def run_cases(cases, asset_index, repeat: int, save_dir: Path, links: dict | Non
             "baseline": first["baseline_verdict"], "model": first["model_verdict"], "final": first["VERDICT"],
             "stable": len({(r["model_verdict"], r["VERDICT"]) for r in runs}) == 1 if repeat > 1 else None,
             "review": first["needs_review"],
-            "finding": first.get("additional_finding"),
+            "charts": len(first.get("charts") or []), "fallback": first.get("report_source") != "analysis",
         })
     return results
 
@@ -122,7 +122,7 @@ def recheck(saved: list[dict]) -> list[dict]:
                                       "threatfox_confidence", "evidence_first_seen", "evidence_last_seen",
                                       "ioc_metadata", "match_ids", "n_events") if k in r}
         out.append(assess.finish_result(identity, r["evidence"], r["case_file"], r["model_reply_raw"],
-                                        r.get("tool_calls") or []))
+                                        r.get("tool_calls") or [], r.get("charts") or []))
     return out
 
 
@@ -138,7 +138,7 @@ def from_output(path: Path, rechecked: bool) -> list[dict]:
         results.append({"indicator": r["indicator"], "host": r["affected_asset"],
                         "baseline": r.get("baseline_verdict", "ERROR"), "model": r.get("model_verdict", "ERROR"),
                         "final": r.get("VERDICT"), "stable": None, "review": r.get("needs_review"),
-                        "finding": r.get("additional_finding")})
+                        "charts": len(r.get("charts") or []), "fallback": r.get("report_source") != "analysis"})
     return results
 
 
@@ -199,8 +199,8 @@ def main() -> None:
             notes.append("MISMATCH")
         if r["review"]:
             notes.append("review")
-        if r.get("finding"):
-            notes.append("agent finding")
+        if r.get("fallback"):
+            notes.append("incomplete report")
         if r["stable"] is False:
             notes.append("UNSTABLE across runs")
         print(f"{r['indicator'][:26]:<26} {r['host']:<16} {SHORT[r['expected']]:>9} {SHORT.get(r['baseline'], r['baseline']):>9} "
@@ -211,12 +211,11 @@ def main() -> None:
     judged = [r for r in rows if r["baseline"] not in ("ERROR", "INSUFFICIENT_DATA")]
     if judged:
         agreed = sum(1 for r in judged if r["model"] == r["baseline"])
-        print(f"\nBlind review agreed with the rules on {agreed}/{len(judged)} case(s) "
-              "(the model does not see the rules' verdict).")
-    findings = [r for r in rows if r.get("finding")]
-    print(f"Agent findings (edge cases the rules do not cover) on {len(findings)}/{len(rows)} case(s):")
-    for r in findings:
-        print(f"  - {r['indicator']} / {r['host']}: {r['finding'][:200]}")
+        print(f"\nThe agent agreed with the rule-based cross-check on {agreed}/{len(judged)} case(s) "
+              "(it does not see the rules' verdict).")
+    written = [r for r in rows if not r.get("fallback")]
+    if written:
+        print(f"Charts per written report: {Counter(r.get('charts', 0) for r in written)}")
     stable = [r["stable"] for r in rows if r["stable"] is not None]
     if stable:
         print(f"\nDeterminism: {sum(stable)}/{len(stable)} case(s) gave the same verdict on every run.")
