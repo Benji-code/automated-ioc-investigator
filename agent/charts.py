@@ -347,6 +347,9 @@ WIDTH = 720
 PLOT_HEIGHT = 220
 FONT = 11
 CHAR_W = 6.4          # rough width of one 11px character, for label space
+LINE_H = 13           # line height of a wrapped label
+LABEL_CHARS = 30      # characters per line of a bar label before it wraps
+LEGEND_CHARS = 60
 BAR_BAND = 28
 BAR_MAX = 24
 
@@ -433,25 +436,57 @@ def _parse_time(text: str) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _legend(chart: dict, top: int, left: int) -> str:
+def _legend(chart: dict, top: int, left: int) -> tuple[str, int]:
+    """Legend keys, moving to a new row at the chart's edge rather than
+    cutting a name short. Returns (svg, extra height used below `top`)."""
     if len(chart["series"]) < 2:
-        return ""
-    parts, x = [], left
+        return "", 0
+    parts, x, y = [], left, top
     for i, s in enumerate(chart["series"]):
-        name = _short(s["name"], 28)
+        lines = wrap_label(s["name"], LEGEND_CHARS)
+        key_w = 22 if chart["kind"] == "line" else 15
+        width = key_w + max(len(line) for line in lines) * CHAR_W + 18
+        if x > left and x + width > WIDTH:
+            x, y = left, y + LINE_H + 4
         if chart["kind"] == "line":
-            key = f'<line x1="{x}" y1="{top - 4}" x2="{x + 16}" y2="{top - 4}" style="stroke:{_color(i)}" stroke-width="2" stroke-linecap="round"/>'
-            text_x = x + 22
+            key = f'<line x1="{x}" y1="{y - 4}" x2="{x + 16}" y2="{y - 4}" style="stroke:{_color(i)}" stroke-width="2" stroke-linecap="round"/>'
         else:
-            key = f'<rect x="{x}" y="{top - 9}" width="10" height="10" rx="2" style="fill:{_color(i)}"/>'
-            text_x = x + 15
-        parts.append(f'{key}<text class="lg" x="{text_x}" y="{top}">{_e(name)}</text>')
-        x = text_x + len(name) * CHAR_W + 18
-    return "".join(parts)
+            key = f'<rect x="{x}" y="{y - 9}" width="10" height="10" rx="2" style="fill:{_color(i)}"/>'
+        parts.append(f'{key}<text class="lg" x="{x + key_w}" y="{y}">{_tspans(lines, x + key_w)}</text>')
+        x += width
+        if len(lines) > 1:  # a wrapped name takes its rows to itself
+            x, y = left, y + LINE_H * len(lines) + 4
+    return "".join(parts), y - top
 
 
-def _short(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def wrap_label(text: str, width: int) -> list[str]:
+    """Break a label into lines of at most `width` characters, at spaces where
+    possible; a long word (a domain) is cut after a dot or hyphen, else
+    anywhere. Never shortens the label."""
+    lines: list[str] = []
+    current = ""
+    for word in str(text).split():
+        while len(word) > width:
+            cut = max(word.rfind(".", 0, width), word.rfind("-", 0, width)) + 1 or width
+            if current:
+                lines.append(current)
+                current = ""
+            lines.append(word[:cut])
+            word = word[cut:]
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current or not lines:
+        lines.append(current)
+    return lines
+
+
+def _tspans(lines: list[str], x: float) -> str:
+    """Lines of one text element, each below the last."""
+    return "".join(f'<tspan x="{x:.1f}" dy="{0 if i == 0 else LINE_H}">{_e(line)}</tspan>'
+                   for i, line in enumerate(lines))
 
 
 def _y_scale(chart: dict, values: list[float]):
@@ -508,7 +543,8 @@ def _line_svg(chart: dict) -> str:
     tick_labels = [fmt_tick(t, chart["unit"]) for t in y_ticks]
     left = int(max(len(t) for t in tick_labels) * CHAR_W + 14)
     right = 18
-    top = (30 if len(chart["series"]) >= 2 else 10) + (16 if is_time and chart.get("markers") else 0)
+    legend, extra = _legend(chart, 14, left)
+    top = (30 + extra if len(chart["series"]) >= 2 else 10) + (16 if is_time and chart.get("markers") else 0)
     plot_w, plot_h = WIDTH - left - right, PLOT_HEIGHT
     height = top + plot_h + 34
     x_lo, x_hi = min(all_x), max(all_x)
@@ -520,7 +556,7 @@ def _line_svg(chart: dict) -> str:
     def py(y: float) -> float:
         return top + plot_h - y_scale(y) * plot_h
 
-    out = [_legend(chart, 14, left)]
+    out = [legend]
     for tick, label in zip(y_ticks, tick_labels):
         y = py(tick)
         css = "base" if tick == y_ticks[0] else "grid"
@@ -637,30 +673,32 @@ def _hbar_svg(chart: dict) -> str:
     marked = chart.get("highlight") or []
     marked = [marked] if isinstance(marked, str) else marked  # results saved before highlights were lists
     highlight = set(marked) & set(categories) if single else set()
-    labels = [_short(c, 26) for c in categories]
-    left = int(max(len(t) for t in labels) * CHAR_W + 16)
+    labels = [wrap_label(c, LABEL_CHARS) for c in categories]
+    left = int(max(len(line) for lines in labels for line in lines) * CHAR_W + 16)
     right = 70 if single else 24
-    top = 30 if not single else 10
+    legend, extra = _legend(chart, 14, left)
+    top = 30 + extra if not single else 10
     plot_w = WIDTH - left - right
     n = len(chart["series"])
-    band = max(BAR_BAND, n * 14 + 8)
+    band = max(BAR_BAND, n * 14 + 8, max(len(lines) for lines in labels) * LINE_H + 8)
     plot_h = band * len(categories)
     height = top + plot_h + 30
 
     def px(v: float) -> float:
         return left + max(v, 0.0) / top_v * plot_w
 
-    out = [_legend(chart, 14, left)]
+    out = [legend]
     for t in ticks:
         x = px(t)
         css = "base" if t == 0 else "grid"
         out.append(f'<line class="{css}" x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}"/>'
                    f'<text x="{x:.1f}" y="{top + plot_h + 18}" text-anchor="middle">{_e(fmt_tick(t, chart["unit"]))}</text>')
     thick = min(BAR_MAX, (band - 8 - 2 * (n - 1)) / n)
-    for row, (category, label) in enumerate(zip(categories, labels)):
+    for row, (category, lines) in enumerate(zip(categories, labels)):
         y0 = top + row * band + (band - (thick * n + 2 * (n - 1))) / 2
-        out.append(f'<text class="lg" x="{left - 8}" y="{top + row * band + band / 2 + 4:.1f}" text-anchor="end">'
-                   f'<title>{_e(category)}</title>{_e(label)}</text>')
+        first_y = top + row * band + band / 2 + 4 - (len(lines) - 1) * LINE_H / 2
+        out.append(f'<text class="lg" x="{left - 8}" y="{first_y:.1f}" text-anchor="end">'
+                   f'<title>{_e(category)}</title>{_tspans(lines, left - 8)}</text>')
         for i, s in enumerate(chart["series"]):
             value = values[s["name"]].get(category)
             if value is None:
@@ -690,7 +728,8 @@ def _column_svg(chart: dict) -> str:
     labels = [fmt_tick(t, chart["unit"]) for t in ticks]
     left = int(max(len(t) for t in labels) * CHAR_W + 14)
     right = 18
-    top = 30 if len(chart["series"]) >= 2 else 10
+    legend, extra = _legend(chart, 14, left)
+    top = 30 + extra if len(chart["series"]) >= 2 else 10
     plot_w, plot_h = WIDTH - left - right, PLOT_HEIGHT
     height = top + plot_h + 34
     n = len(chart["series"])
@@ -706,7 +745,7 @@ def _column_svg(chart: dict) -> str:
     def py(v: float) -> float:
         return top + plot_h - max(v, 0.0) / top_v * plot_h
 
-    out = [_legend(chart, 14, left)]
+    out = [legend]
     for t, label in zip(ticks, labels):
         css = "base" if t == 0 else "grid"
         out.append(f'<line class="{css}" x1="{left}" x2="{left + plot_w}" y1="{py(t):.1f}" y2="{py(t):.1f}"/>'
@@ -766,7 +805,7 @@ def prepared(ev: dict) -> list[dict]:
     to be worth a chart."""
     host = ev["identity"]["affected_asset"]
     options = []
-    for builder in (_contact_chart, _load_chart, _host_type_chart, _sites_chart, _peers_chart,
+    for builder in (_contact_chart, _load_chart, _usage_chart, _host_type_chart, _sites_chart, _peers_chart,
                     _destinations_chart, _apps_chart):
         try:
             chart = builder(ev, host)
@@ -819,6 +858,22 @@ def _load_chart(ev: dict, host: str) -> dict | None:
         "sql": "", "source": load.get("sources", ""), "markers": _match_markers(ev),
         "caption": "All of the host's traffic, to every destination, with the flagged contact marked: does it "
                    "stand out from the host's normal day?"}, frame, host)
+    return None if error else chart
+
+
+def _usage_chart(ev: dict, host: str) -> dict | None:
+    """The host's traffic by kind of use (adult content, gaming, ...)."""
+    other = ev.get("other_traffic") or {}
+    categories = (other.get("activity_profile") or {}).get("categories") or []
+    if not categories:
+        return None
+    frame = pd.DataFrame([{"use": c["category"], "traffic": c["bytes"]} for c in categories])
+    chart, error = build_chart({
+        "id": "usage", "kind": "bar", "x": "use", "y": ["traffic"], "unit": "bytes",
+        "title": "What the host is used for: its traffic by kind of use", "sql": "",
+        "source": f"subscriber_activity_1m, {(other.get('window') or {}).get('subscriber_activity_1m', '')}".rstrip(", "),
+        "caption": "Sites grouped by kind of use from a local list; traffic to unlisted sites is not shown."},
+        frame, host, highlight=[])
     return None if error else chart
 
 
@@ -928,4 +983,6 @@ def describe(chart: dict) -> str:
         xs = [p[0] for s in chart["series"] for p in s["points"]]
         when = f" from {min(xs)[:16].replace('T', ' ')} to {max(xs)[:16].replace('T', ' ')} UTC;"
     marked = " The flagged contact is marked." if chart.get("markers") else ""
-    return f"[[chart {chart['id']}]] {chart['title']} ({chart['kind']}):{when} {'; '.join(parts)}.{marked}"
+    # The marker comes last: a line that starts with it was pasted whole into reports.
+    return (f"{chart['id']}: {chart['title']} ({chart['kind']}):{when} {'; '.join(parts)}.{marked} "
+            f"Place as [[chart {chart['id']}]].")

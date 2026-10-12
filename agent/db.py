@@ -42,6 +42,7 @@ MAX_NAME_ROWS = 50
 MAX_PASSIVE_DNS_ROWS = 40
 MAX_TIMELINE_ROWS = 40
 MAX_TIMELINE_MINUTES = 180
+MAX_WINDOW_FLOW_ROWS = 500  # one contact window's rows before the timeline picks what to show
 MAX_MATCH_WINDOWS = 20      # ±N-minute windows around feed matches, merged and capped
 MAX_OTHER_LONG_FLOWS = 200
 OTHER_LONG_FLOW_MIN_SEC = 3600
@@ -403,6 +404,24 @@ def fetch_host_timeline(client_ip: str, start: datetime, end: datetime, own_name
     GROUP BY root_name, dns_name, sni, server_ip, server_port, transport_protocol
     ORDER BY up_total + down_total DESC
     LIMIT {MAX_TIMELINE_ROWS}
+    """
+    return query(sql).rename(columns={**NAME_RENAMES, **TOTALS_TO_BYTES})
+
+
+def fetch_host_window_flows(client_ip: str, start: datetime, end: datetime, own_name: str | None = None) -> pd.DataFrame:
+    """All of the host's traffic in a short window, one row per destination,
+    port and app label, earliest first: the flow timeline around a contact."""
+    sql = f"""
+    SELECT {_name_columns(own_name)}, sni, server_ip, server_port, transport_protocol,
+           application, application_category, any(server_metadata__asn_organization) AS asn_org,
+           count() AS minutes, sum(flow_count) AS flows,
+           sum(up_volume__bytes) AS up_total, sum(down_volume__bytes) AS down_total,
+           min(time) AS first_time, max(time) AS last_time
+    FROM {SUBSCRIBER_ACTIVITY_TABLE}
+    WHERE {_host(client_ip)} AND {_time_filter("time", start, end)}
+    GROUP BY root_name, dns_name, sni, server_ip, server_port, transport_protocol, application, application_category
+    ORDER BY first_time, up_total + down_total DESC
+    LIMIT {MAX_WINDOW_FLOW_ROWS}
     """
     return query(sql).rename(columns={**NAME_RENAMES, **TOTALS_TO_BYTES})
 

@@ -23,7 +23,7 @@ from functools import partial
 from pathlib import Path
 
 from agent import (behaviour, casefile, charts, config, correlation, db, evidence, host_type, llm_client,
-                   mdrender, report, signals, tools)
+                   mdrender, report, signals, timeline, tools)
 
 HERE = Path(__file__).resolve().parent
 # Local Ollama has no rate limit; OpenRouter's free tier does.
@@ -78,6 +78,21 @@ itself an exposure. Platform comes from user agents where the host sent any.
 - DNS: dns_tuple shows which external resolvers the host asks directly, with \
 no domain names and no response codes, so there is no NXDOMAIN rate. An \
 unusual resolver or a high unanswered share is only a weak hint.
+- WHAT THE HOST IS USED FOR: the host's own traffic grouped by kind of use \
+(adult content, gaming, streaming or social media, study help, work tools), \
+with volumes, shares and the main sites, then the busiest sites that are on no \
+list. The lists are short and miss many sites: judge what every site is from \
+its name yourself (a name with porn, xxx, sex, cams, nsfw or tube in it, or a \
+known adult brand, is adult content; likewise games, streaming, study or work \
+sites), in this section, the busiest destinations and the FLOW TIMELINE. It is \
+the main evidence of what the machine is and who uses it. On a university network, personal use such as \
+pornography, games or streaming, or study-help sites, points to a student's \
+own device; workplace tools with no personal use point to staff; neither \
+points to an unclear user.
+- FLOW TIMELINE: all of the host's traffic in the minutes around the contacts, \
+rows F1, F2, ... in time order. It shows what the host was doing when the \
+contact happened: the page or app that was open, and what came just before \
+and after it. Rows in the same minute as the flagged contact are its context.
 - Evidence marked "from the IOC feed, not re-queried" is the feed's own copy \
 of the matched rows: real, but only the matched minutes.
 - The evidence first/last seen times are the matched flow's own times, not \
@@ -145,8 +160,8 @@ risk worth following up.
 Charts:
 The case file ends with READY-MADE CHARTS, built from the evidence. Choose the \
 1-3 that best support your analysis and place each on its own line where it \
-belongs, as written there, e.g. [[chart host_load]]. Then say in the text what \
-the reader should see in it. If none of them shows what matters, make your own \
+belongs, as written there, e.g. [[chart host_load]]. Then say in your own words \
+what the reader should see in it; never copy the chart's description line. If none of them shows what matters, make your own \
 with the add_chart tool and place it as [[chart N]] with the number it returns. \
 Never write SQL or chart instructions in the report itself.
 
@@ -167,17 +182,55 @@ The report has exactly these four parts, as ## headings, in this order:
 
 ## Executive summary
 Three to five sentences for a reader who reads nothing else: which host \
-contacted what and when, what the traffic actually was, your verdict and the \
-main reason, and the one thing to do now.
+contacted what and when, what the host appears to be and who likely uses it \
+(and the activity that shows it), what the traffic \
+actually was, your verdict and the main reason, and the one thing to do now.
+
+## Background
+What a reader needs before the analysis, in three ### parts of a short \
+paragraph or two each:
+### The host
+What the machine appears to be and how it is normally used, read from its own \
+traffic: its classified type and how sure that is, its operating system, its \
+uptime and usual volume. Then what it is used for: name the kinds of content \
+and activity and the main sites, with their volumes and shares from WHAT THE \
+HOST IS USED FOR (for example "adult video sites carried over half of its \
+traffic, most of it to one site"). State it plainly and factually; it is evidence. \
+From that activity, infer whether a student or a staff member most likely \
+uses the machine, and say which activity points there: pornography, games, \
+streaming and social media, or study-help sites point to a student's own \
+device; workplace tools with no personal use point to staff. If nothing points \
+either way, say the user is unclear. Present it as an inference from the \
+traffic, not a fact, and do not guess where the host is or which network it \
+is on unless the host name plainly says so.
+### The threat
+What the indicator is and why it matters: the malware family and threat type, \
+how it usually reaches a machine, what it does once there, and what harm it \
+could do to the host's user and to the university.
+### What an affected host looks like
+The typical characteristics of an infected host in flow data: which \
+destinations, ports and protocols, how often and at what times of day, how \
+much data each way, and what usually comes just before the contact (for \
+example a web page visit before a fake-update download). This is the \
+yardstick the Analysis measures this host against.
 
 ## Analysis
-The investigation itself: what the flow data shows and what your own queries \
-added; how the host's behaviour compares with typical hosts of its type; the \
-evidence for and against compromise, weighing the benign \
-explanation (shared infrastructure, a known service's normal client, an app \
-label, a popular destination) against the malicious one; which evidence \
-decides it; and anything that does not fit. Place your charts here. Use ### \
-subheadings only if the analysis covers several distinct strands.
+The investigation, as a breakdown of the evidence behind the verdict, with \
+### subheadings for its strands, for example: when and how the contact \
+happened; what the host was doing around it; how it compares with an affected \
+host and with the host's normal behaviour; what decides it. Be investigative. \
+Give the exact times of the contacts (UTC, with local time), and use the FLOW \
+TIMELINE to say what the host did in the minutes before and during it, and in \
+what order, with times. Look for the sequence that explains the contact: an \
+adult or streaming site already open in the minutes before a burst of flagged \
+ad domains, ad networks and click redirects is most likely pop-up or redirect \
+ads loaded by that site, while a contact with nothing around it looks \
+automated. Name the sites, the times and the gap between them. \
+Cite the timeline rows you rely on in the sentence as [[flow F3]] (or \
+[[flow F3-F6]]); they link to the flow table. Weigh the benign explanation \
+(shared infrastructure, a known service's normal client, an app label, a \
+popular destination, an ad) against the malicious one, say which evidence \
+decides it, and note anything that does not fit. Place your charts here.
 
 ## Conclusion and next steps
 The verdict, how confident you are and why; any risk that remains even if this \
@@ -185,18 +238,7 @@ is not the flagged malware; what the evidence cannot show for this case; then \
 numbered next steps specific to this host (who to contact, what to check, what \
 to alert on), most important first.
 
-## Background
-Reference for a reader new to the case, shown folded away, so the three parts \
-above must stand on their own. Cover what the host appears to be (its \
-classified type and how sure that is, operating system, uptime and usual \
-traffic, and what normal looks like for that type; a reading of the evidence, \
-not a fact, and no guess at where it is or which network it is on unless the \
-host name plainly says so); what the threat is (the malware family and threat \
-type, how it usually arrives and what it does); what a compromised host would \
-look like in flow data; and what the flagged address is (its owner, and \
-whether it is shared).
-
-Length: a simple case about 400-600 words in all; a complex one up to about 1,200.
+Length: a simple case about 700-1,000 words in all; a complex one up to about 1,600.
 
 Rules for the report text:
 - Every number must appear in the case file or a tool result (the ready-made \
@@ -207,23 +249,38 @@ a prompt, the case file or its step numbers, or yourself ("I", "my"). Name data 
 by what it is, e.g. "per-minute flow records".
 - No title: the page already shows the indicator and the host above the report.
 
-Reply in exactly this format: four header lines, then REPORT: on its own line, \
-then the four parts.
+Reply in exactly this format: the header lines, FLOW_NOTES, then REPORT: on its \
+own line, then the four parts.
 
 VERDICT: <LIKELY_THREAT | SUSPICIOUS | LIKELY_FALSE_POSITIVE>
 CONFIDENCE: <low | medium | high>
-HOST_ROLE: <one hedged sentence: what the machine probably is, based first on its \
+HOST_ROLE: <one hedged sentence: what the machine probably is, based on its \
 uptime and other traffic>
+LIKELY_USER: <student | staff | unclear> - <the activity that points there, \
+naming the kind of use and the main sites by domain>
 HEADLINE: <one sentence for the case list: what happened and your assessment>
+FLOW_NOTES:
+F1: <a few words on what this connection most likely is>
+F2: <...one line per FLOW TIMELINE row; rows with the same note may share a \
+line, e.g. F4-F6: ...; "none" if there are no rows>
 REPORT:
 ## Executive summary
+...
+## Background
+### The host
+...
+### The threat
+...
+### What an affected host looks like
 ...
 ## Analysis
 ...
 ## Conclusion and next steps
 ...
-## Background
-...
+
+FLOW_NOTES examples: "video page on the adult site", "pop-up ad loaded by \
+that page", "flagged ad domain, same minute as the pop-up", "Windows update \
+check", "background sync, unrelated".
 
 VERDICT meanings: LIKELY_THREAT = evidence supports escalation; SUSPICIOUS = \
 mixed or incomplete, needs a manual look; LIKELY_FALSE_POSITIVE = the traffic \
@@ -231,8 +288,9 @@ does not match the threat (shared infrastructure, a known service's normal \
 client, or a shape that doesn't fit), even if some other risk remains.
 """
 
-HEADER_FIELDS = ["VERDICT", "CONFIDENCE", "HOST_ROLE", "HEADLINE"]
+HEADER_FIELDS = ["VERDICT", "CONFIDENCE", "HOST_ROLE", "LIKELY_USER", "HEADLINE", "FLOW_NOTES"]
 FIELDS = HEADER_FIELDS + ["REPORT"]
+MULTI_LINE_FIELDS = ("FLOW_NOTES",)  # one note per line
 VERDICTS = {"LIKELY_THREAT", "SUSPICIOUS", "LIKELY_FALSE_POSITIVE"}  # the model's choices
 ONE_WORD_FIELDS = ("VERDICT", "CONFIDENCE")
 REPORT_MARKER_RE = re.compile(r"(?i)^REPORT\s*:?(.*)$")
@@ -275,12 +333,17 @@ def parse_reply(text: str) -> dict:
             current = field
             parsed[field] = stripped.split(":", 1)[1].strip()
         elif current and current not in ONE_WORD_FIELDS and stripped:
-            parsed[current] = (parsed[current] + " " + stripped).strip()
+            joiner = "\n" if current in MULTI_LINE_FIELDS else " "
+            parsed[current] = (parsed[current] + joiner + stripped).strip()
     if marker is not None:
         first = REPORT_MARKER_RE.match(_clean(lines[marker])).group(1).strip()
         parsed["REPORT"] = _clean_report("\n".join([first] + lines[marker + 1:]))
     else:
         parsed["REPORT"] = _clean_report("\n".join(lines[header_end:]))
+    parsed["REPORT"], trailing = _split_trailing_notes(parsed["REPORT"])
+    if trailing and not parsed["FLOW_NOTES"]:
+        parsed["FLOW_NOTES"] = trailing
+    parsed["flow_notes"] = parse_flow_notes(parsed["FLOW_NOTES"])
     # One-word fields: take the known value, ignoring any stray text after it.
     verdict = parsed["VERDICT"].upper().replace(" ", "_")
     given = next((v for v in sorted(VERDICTS, key=len, reverse=True) if v in verdict), None)
@@ -290,6 +353,38 @@ def parse_reply(text: str) -> dict:
     parsed["CONFIDENCE"] = confidence.group(1).lower() if confidence else "low"
     parsed["SECTIONS"] = split_sections(parsed["REPORT"])
     return parsed
+
+
+TRAILING_NOTES_RE = re.compile(r"(?im)^\W*FLOW_NOTES\s*:?\**\s*(.*)$")
+
+
+def _split_trailing_notes(report_text: str) -> tuple[str, str]:
+    """FLOW_NOTES written after the report instead of before it: (report, notes)."""
+    match = TRAILING_NOTES_RE.search(report_text)
+    if not match:
+        return report_text, ""
+    notes = (match.group(1) + "\n" + report_text[match.end():]).strip()
+    return report_text[:match.start()].rstrip(), notes
+
+
+FLOW_NOTE_RE = re.compile(r"^\W*(F\d+(?:\s*(?:,|&|-|–|—|\bto\b|\band\b)\s*F?\d+)*)\s*[:=]\s*(.+)$", re.I)
+FLOW_RANGE_RE = re.compile(r"F?(\d+)(?:\s*(?:-|–|—|\bto\b)\s*F?(\d+))?", re.I)
+MAX_NOTE_RANGE = 100
+
+
+def parse_flow_notes(text: str) -> dict[str, str]:
+    """FLOW_NOTES lines ("F3: pop-up ad", "F4-F6: video page") -> {"F3": note, ...}."""
+    notes: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        match = FLOW_NOTE_RE.match(line.replace("**", "").strip())
+        if not match:
+            continue
+        note = match.group(2).strip().strip("*").strip()
+        for first, last in FLOW_RANGE_RE.findall(match.group(1)):
+            a, b = int(first), int(last or first)
+            if a <= b <= a + MAX_NOTE_RANGE:
+                notes.update({f"F{n}": note for n in range(a, b + 1)})
+    return notes
 
 
 SECTION_TITLES = mdrender.SECTION_TITLES
@@ -358,6 +453,7 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
 
     port = server_ips.get("indicator_port")
     contact = _safe("beacon_analysis", tools.beacon_analysis, host, ip_list, port, window, case_rows)
+    flow_timeline = _safe("contact_timeline", timeline.contact_timeline, host, ip_list, contact, identity, own_name)
     app_context = _safe("app_context_for_indicator", tools.app_context_for_indicator, host, ip_list, window, identity)
     host_apps = _safe("host_applications", tools.host_applications, host, window)
     dns = _safe("host_dns_behaviour", tools.host_dns_behaviour, host, identity)
@@ -375,6 +471,7 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
         "names_on_ip": names_on_ip,
         "domain_features": features,
         "contact": contact,
+        "timeline": flow_timeline,
         "app_context": app_context,
         "host_apps": host_apps,
         "dns": dns,
@@ -509,12 +606,14 @@ def consistency_flags(parsed: dict, ev: dict) -> list[str]:
 
 
 NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
-CHECKED_FIELDS = ("HOST_ROLE", "HEADLINE", "REPORT")
+CHECKED_FIELDS = ("HOST_ROLE", "LIKELY_USER", "HEADLINE", "FLOW_NOTES", "REPORT")
 
 
 def _checkable(text: str) -> str:
-    """Text whose numbers must be in the evidence: no chart markers or list numbering."""
+    """Text whose numbers must be in the evidence: no chart markers, flow row
+    ids (F3) or list numbering."""
     text = mdrender.CHART_ANYWHERE_RE.sub(" ", text)
+    text = mdrender.FLOW_ID_RE.sub(" ", mdrender.replace_flow_refs(text))
     text = re.sub(r"(?m)^\s*\d+[.)]\s", " ", text)
     return re.sub(r"(?<=\d),(?=\d)", "", text)
 
@@ -647,12 +746,17 @@ does not guess the host's location or network.
 6. It does not rely on ThreatFox confidence: that rates the indicator, not this host.
 7. It places 1-3 charts, each on its own line ([[chart name]] from READY-MADE CHARTS, or [[chart N]] for \
 one you made) next to the text that explains it.
-8. It has the four parts in order (Executive summary, Analysis, Conclusion and next steps, Background), \
+8. It has the four parts in order (Executive summary, Background, Analysis, Conclusion and next steps), \
 the next steps are specific to this host, and nothing mentions an agent, a model, yourself, the case \
 file or step numbers.
+9. The Background has its three ### parts: The host (what it is used for, naming the kinds of use and \
+main sites with their volumes, and whether a student or staff member likely uses it), The threat (why \
+it matters), and What an affected host looks like. LIKELY_USER says student, staff or unclear and why.
+10. The Analysis gives the times of the contacts, says what the host was doing around them from the FLOW \
+TIMELINE, and cites those rows as [[flow F3]]; FLOW_NOTES has a short note for every timeline row.
 {problems}
 You may use the tools again, for example to check a number or fix a chart. Then reply with the complete \
-answer in the same format: the four header lines, REPORT:, and the four parts. If it already holds up, \
+answer in the same format: the header lines, FLOW_NOTES, REPORT:, and the four parts. If it already holds up, \
 repeat it unchanged."""
 
 EXPOSURE_WORDS_RE = re.compile(r"(?i)expos|firewall|tunnel|remote|inbound|reach")
@@ -705,6 +809,9 @@ def self_check_problems(parsed: dict, ev: dict, evidence_text: str, charts: list
     if full_text and not (re.search(r"(?m)^\s*(\d+[.)]|[-*])\s", conclusion) or NEXT_STEPS_RE.search(conclusion)):
         problems.append("The Conclusion and next steps part has no next steps.")
     problems += _chart_problems(full_text, charts or [], ev.get("chart_options") or [])
+    problems += _structure_problems(sections, full_text, has_traffic=not _no_traffic(ev))
+    problems += flow_problems(parsed, ev)
+    problems += usage_problems(parsed, ev)
     role = parsed.get("HOST_ROLE", "")
     if role and host_type.role_problem(role, ev):
         problems.append("Your HOST_ROLE is not supported by the evidence: base it on the uptime and the app and "
@@ -729,6 +836,72 @@ def _chart_problems(report_text: str, custom: list[dict], options: list[dict]) -
     if unplaced:
         problems.append(f"You made chart(s) {', '.join(unplaced)} but did not place them: place them with "
                         "[[chart N]] or leave them out on purpose.")
+    return problems
+
+
+CHART_COPY_RE = re.compile(r"\((?:line|bar)\):")
+TIME_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+BACKGROUND_PARTS = 3
+
+
+def _structure_problems(sections: dict, full_text: str, has_traffic: bool) -> list[str]:
+    problems = []
+    background = sections.get("background", "")
+    if background and len(re.findall(r"(?m)^\s*###\s", background)) < BACKGROUND_PARTS:
+        problems.append("The Background needs its three ### parts: The host (including what kind of device it "
+                        "likely is, from its activity), The threat, and What an affected host looks like.")
+    if CHART_COPY_RE.search(full_text):
+        problems.append("The report copies chart description lines from READY-MADE CHARTS: place only the "
+                        "[[chart name]] marker and say in your own words what the chart shows.")
+    if has_traffic and sections.get("analysis") and not TIME_RE.search(sections["analysis"]):
+        problems.append("The Analysis gives no times: say when the contacts happened (UTC, with local time) and "
+                        "what the host was doing then.")
+    return problems
+
+
+def usage_problems(parsed: dict, ev: dict) -> list[str]:
+    """The report must say what the host is used for and who likely uses it."""
+    problems = []
+    user = parsed.get("LIKELY_USER", "")
+    if not host_type.user_type(user):
+        problems.append("LIKELY_USER is missing: give student, staff or unclear, then the activity that points "
+                        "there (see WHAT THE HOST IS USED FOR).")
+    elif host_type.user_problem(user, ev):
+        problems.append(f"LIKELY_USER says {host_type.user_type(user)}, but WHAT THE HOST IS USED FOR shows no "
+                        "activity of that kind: base it on that section or say unclear.")
+    categories = (((ev.get("other_traffic") or {}).get("activity_profile") or {}).get("categories") or [])[:2]
+    names = [c["category"] for c in categories] + [site["domain"] for c in categories for site in c["sites"]]
+    background = (parsed.get("SECTIONS") or {}).get("background", "").lower()
+    if names and background and not any(name.lower() in background for name in names):
+        top = categories[0]
+        problems.append(f"The host part of the Background does not say what the host is used for: name the kinds "
+                        f"of use and main sites from WHAT THE HOST IS USED FOR (e.g. {top['category']}: "
+                        f"{', '.join(site['domain'] for site in top['sites'][:2])}) and what they say about who "
+                        "uses it.")
+    return problems
+
+
+def flow_problems(parsed: dict, ev: dict) -> list[str]:
+    """Flow timeline rows the report cites that do not exist, no citations at
+    all, and rows with no note in FLOW_NOTES."""
+    ids = timeline.row_ids(ev.get("timeline"))
+    cited = mdrender.flow_refs(parsed.get("REPORT", ""))
+    unknown = [i for i in dict.fromkeys(cited) if i not in ids]
+    problems = []
+    if unknown:
+        rows = f"rows {ids[0]}-{ids[-1]}" if ids else "no rows"
+        problems.append(f"[[flow {unknown[0]}]] is not a row of the FLOW TIMELINE ({rows}).")
+    if not ids:
+        return problems
+    if not cited:
+        problems.append("The Analysis cites no FLOW TIMELINE rows: say what the host was doing around the contact "
+                        "and cite the rows as [[flow F3]].")
+    notes = parsed.get("flow_notes") or {}
+    missing = [i for i in ids if i not in notes]
+    if missing:
+        shown = ", ".join(missing[:15]) + (" and more" if len(missing) > 15 else "")
+        problems.append(f"FLOW_NOTES has no note for {shown}: give every timeline row a few words on what the "
+                        "connection most likely is.")
     return problems
 
 
@@ -800,6 +973,10 @@ def finish_result(identity: dict, ev: dict, case_file: str, reply_text: str, too
     evidence_text = case_file + json.dumps(tool_trace, default=str)
     numbers = unverified_numbers(parsed, evidence_text)
     flags = consistency_flags(parsed, ev)
+    ids = set(timeline.row_ids(ev.get("timeline")))
+    unknown_rows = [i for i in dict.fromkeys(mdrender.flow_refs(parsed["REPORT"])) if i not in ids]
+    if unknown_rows:
+        flags.append(f"The report cites flow rows that are not in the timeline: {', '.join(unknown_rows)}.")
     if numbers:
         flags.append(f"Numbers not found in the evidence: {', '.join(numbers)}.")
     links = ev.get("correlation")

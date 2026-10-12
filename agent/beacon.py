@@ -42,6 +42,7 @@ PATTERNS = {
     "insufficient_data": "No per-minute contact data in the window",
 }
 MAX_LISTED_BURSTS = 8
+MAX_KEPT_BURSTS = 2000
 
 
 def _local_hours(times: pd.Series) -> pd.Series:
@@ -99,6 +100,9 @@ def features(frame: pd.DataFrame, bin_minutes: int, window_minutes: float) -> di
         "median_burst_min": float(np.median([b["bins"] * bin_minutes for b in bursts])),
         "longest_run_min": int(max(b["bins"] for b in bursts) * bin_minutes),
         "burst_starts": [fmt_time(b["start"]) for b in bursts[:MAX_LISTED_BURSTS]],
+        # Every burst's [first bin, last bin, bytes], for the flow timeline around the contact.
+        "burst_spans": [[fmt_time(b["start"]), fmt_time(b["end"]), b["up"] + b["down"]]
+                        for b in bursts[:MAX_KEPT_BURSTS]],
         "gap_regularity": _regularity_score(gaps) if len(gaps) >= 2 else None,
         "median_gap_min": round(float(np.median(gaps)), 1) if len(gaps) else None,
         "volume_consistency": consistency if len(bursts) > 1 else None,

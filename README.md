@@ -25,6 +25,8 @@ follow-up tools (below).
 | 3 | Identify every flagged IP, its ASN and whether it is shared infrastructure | Auto | `tools.identify_server_ips`, `tools.ip_asn` |
 | 4 | Set expected behaviour: threat type, malware family, known services; domain features | Auto | `tools.expected_behaviour`, `tools.domain_features`, `knowledge.py` |
 | 5 | Analyse flows between host and flagged IP, the names (SNI/DNS) the host used on it, the per-minute contact pattern, and app labels | Auto | `tools.indicator_flows`, `tools.indicator_names`, `tools.beacon_analysis`, `tools.app_context_for_indicator`, `beacon.py` |
+| 1b | What the host is used for: its traffic by kind of use (adult content, gaming, streaming, study help, work tools) with volumes, shares and main sites, plus its busiest unlisted sites for the model to judge by name | Auto | `analysis.activity_profile`, `knowledge.HOST_ACTIVITY_HINTS` |
+| 5e | Flow timeline: the host's traffic from 5 min before to 2 min after the first, largest and last contact episodes, one row per site and per flagged address (lead-in and known kinds first), rows F1, F2, ... | Auto | `timeline.py` |
 | 6 | Compare with expected compromised behaviour, investigating further with its own queries | Agent | prompt in `assess.py`, follow-up tools |
 | 7 | Compare with the host's traffic to other IPs: apps, user-agent platform, DNS behaviour, load and uptime | Auto + agent | `tools.host_other_traffic`, `tools.host_applications`, `tools.host_dns_behaviour`, `tools.host_load_baseline` |
 | 7b | Classify the host (workstation, NAT gateway, web server, ...) and compare it with typical hosts of that type | Auto + agent | `agent/host_type.py`, `host_classification/` |
@@ -34,16 +36,36 @@ follow-up tools (below).
 
 The model writes the report, in four parts:
 
-- **Executive summary**: three to five sentences: what happened, the verdict
-  and main reason, and the one thing to do.
-- **Analysis**: the investigation as connected reasoning: what the flows and
-  its own queries show, the benign explanation weighed against the malicious
-  one, what decides it, with its charts.
+- **Executive summary**: three to five sentences: what happened, what the
+  host appears to be, the verdict and main reason, and the one thing to do.
+- **Background**, in three parts: *The host* (its type, normal behaviour and
+  uptime, and what kind of device it likely is and who uses it, inferred from
+  its activity, e.g. adult sites, games and streaming point to a student's
+  personal device); *The threat* (what the IOC is and why it matters); *What
+  an affected host looks like* (expected flow behaviour, the yardstick for
+  the analysis).
+- **Analysis**: a breakdown of the evidence behind the verdict, with
+  subheadings: when the contacts happened (exact times), what the host was
+  doing around them from the flow timeline (e.g. a flagged ad domain in the
+  same minute as an adult site and ad exchanges is a pop-up ad), how that
+  compares with an affected host and with the host's normal traffic, and what
+  decides it, with its charts. It cites timeline rows as `[[flow F3]]`, which
+  become links to the flow table.
 - **Conclusion and next steps**: verdict and confidence, remaining risk, what
   the evidence cannot show, numbered steps specific to the host.
-- **Background** (folded away in the report): what the host appears to be,
-  what the threat is, what a compromised host would look like in flow data,
-  and what the flagged address is.
+
+The model also gives `LIKELY_USER` (student, staff or unclear, and the
+activity behind it): personal use such as pornography, games or streaming, or
+study-help sites, points to a student; workplace tools with no personal use
+to staff. Code checks it against the host's kinds of use
+(`knowledge.USER_EVIDENCE`) and shows it in the case's facts box.
+
+Before the report, the model writes `FLOW_NOTES`: a few words per timeline
+row on what the connection most likely is. The report ends with two folded
+sections: **Figures** (the charts it chose) and **Flows around the flagged
+contact**, a table of the timeline rows (time, duration, host → remote
+IP:port, up/down bytes, a factual description of the remote end, and the
+model's note).
 
 The prompt says what each part covers and asks for an analyst's own words
 and specific facts (times, names, ports, volumes, comparisons), not a
@@ -53,7 +75,8 @@ check catches any traffic detail the model invents). Code never writes report
 text: it checks the report (below), and a missing or incomplete report is shown
 as written and marked for review. The charts the model chose are collected in
 a collapsible **Figures** section at the end; where the model placed one, the
-text links to it.
+text links to it. Long chart labels wrap onto extra lines rather than being
+cut short.
 
 Each case gets a **behaviour category** (`agent/behaviour.py`): tunnelling,
 remote access, connection to a tunnel's public port, C2-like beaconing,
@@ -82,7 +105,7 @@ one-line reason:
 | Signal | Against threat when | Supports threat when |
 |---|---|---|
 | `shared_infrastructure` | CDN/cloud range or ASN, many campus hosts, many domains on the IP, or a known public service | One domain on the IP and not a shared ASN (weak) |
-| `sni_matches_indicator` | The names the host used on the IP are ordinary sites | Domain indicator named in the traffic; or a name that is itself flagged, dynamic DNS, or rare and DGA-like (strong); rare, new, DGA-like or free hosting alone (weak) |
+| `sni_matches_indicator` | The names the host used on the IP are ordinary sites | A name that is itself flagged, dynamic DNS, or rare and DGA-like (strong); rare, new, DGA-like or free hosting alone (weak). A domain indicator's own name in the traffic is neutral: it only confirms the contact the feed matched on |
 | `protocol_fit` | QUIC (UDP/443) or TLS web browsing, for a custom-TCP family | TCP to a non-web port, for a custom-TCP family (weak) |
 | `traffic_shape_fit` | A few short sessions (botnet_cc); a tiny transfer (payload_delivery) | Regular check-ins (strong); a payload-sized download (weak) |
 | `contact_pattern` | One-off or human-like use (per-minute data); or a periodic/held-open pattern explained by a recognised app, session, known service or popular destination | Unexplained regular small check-ins day and night (strong) or an unexplained held-open connection (weak) |

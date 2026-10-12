@@ -157,8 +157,12 @@ def sni_matches_indicator(ev: dict) -> dict:
         if _service_fits(ev.get("expected", {})):
             return _signal("sni_matches_indicator", matched[0], NEUTRAL,
                            "The host used the indicator's name, but only as the known service's own client.")
-        return _signal("sni_matches_indicator", matched[0], SUPPORTS,
-                       f"The host's traffic names the flagged domain ({matched[0]}).", "strong")
+        # The feed matched because the host used this domain, so seeing the
+        # name again only confirms the contact: it fired on every domain case,
+        # including pop-up ads, so it is not evidence of compromise.
+        return _signal("sni_matches_indicator", matched[0], NEUTRAL,
+                       f"The host's traffic names the flagged domain ({matched[0]}): this confirms the contact the "
+                       "feed matched on, not that it was malicious.")
 
     strong, weak = _bad_name_reasons(ev)
     if strong:

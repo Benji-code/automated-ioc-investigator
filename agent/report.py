@@ -1,9 +1,11 @@
 """Step 10: write the reports.
 
-Every report is the model's own writing, in three parts (executive summary,
-analysis, conclusion and next steps) plus a folded-away background, with its
-chosen charts collected at the end. Code adds only the facts box, the
-rule-based cross-check and the reasons a case needs review.
+Every report is the model's own writing, in four parts (executive summary,
+background, analysis, conclusion and next steps), with its chosen charts and
+the flow table around the contact collected at the end, each folded away.
+Code adds only the facts box, the flow table's facts, the rule-based
+cross-check and the reasons a case needs review; the flow table's "likely
+connection" column is the model's FLOW_NOTES.
 
 - render_markdown(): one report per case, with its charts as SVG files.
 - write_case_files(): the report, its charts, and the case file the model
@@ -20,7 +22,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import charts as chart_tools, config, correlation, host_type, mdrender, tools
+from . import analysis, casefile, charts as chart_tools, config, correlation, host_type, mdrender, tools
 
 VERDICT_ORDER = {"LIKELY_THREAT": 0, "SUSPICIOUS": 1, "LIKELY_FALSE_POSITIVE": 2, "INSUFFICIENT_DATA": 3}
 VERDICT_STYLE = {  # css class, label
@@ -30,7 +32,7 @@ VERDICT_STYLE = {  # css class, label
     "INSUFFICIENT_DATA": ("nodata", "Insufficient data"),
     "ERROR": ("nodata", "Assessment failed"),
 }
-SECTIONS = [(key, mdrender.SECTION_TITLES[key]) for key in ("summary", "analysis", "conclusion")]
+SECTIONS = [(key, mdrender.SECTION_TITLES[key]) for key in ("summary", "background", "analysis", "conclusion")]
 TITLE = "IOC Investigation Report"
 
 
@@ -76,6 +78,18 @@ def _role(result: dict) -> str:
     return "" if host_type.role_problem(role, ev) else role
 
 
+def _user(result: dict) -> str:
+    """The student/staff reading, if the host's activity backs it."""
+    text = (result.get("LIKELY_USER") or "").strip()
+    if not text or not _written(result) or result.get("unverified_numbers"):
+        return ""
+    if host_type.user_problem(text, result.get("evidence") or {}):
+        return ""
+    kind = host_type.user_type(text)
+    reason = re.sub(r"^\W*\w+\W*", "", text, count=1).strip()
+    return kind.capitalize() + (f": {reason}" if reason else "")
+
+
 def _parts(result: dict) -> dict[str, str]:
     """The report's four parts, as the model wrote them."""
     return result.get("SECTIONS") or mdrender.split_sections(result.get("REPORT") or "")
@@ -103,12 +117,14 @@ def render_markdown(result: dict) -> str:
     if check:
         meta += f" · {check}"
     out = [title, "", meta, ""]
+    if _user(result):
+        out += [f"**Likely user (from its activity):** {_user(result)}", ""]
     if result.get("needs_review"):
         out += ["> **Marked for review.** " + " ".join(_review_notes(result)), ""]
     parts = _parts(result)
     numbers = _figure_numbers(result)
-    for key, heading in SECTIONS + [("background", "Background")]:
-        text = parts.get(key, "").strip()
+    for key, heading in SECTIONS:
+        text = mdrender.replace_flow_refs(parts.get(key, "").strip())
         if not text:
             continue
         out += [f"## {heading}", ""]
@@ -122,6 +138,7 @@ def render_markdown(result: dict) -> str:
         out.append("")
     if numbers:
         out += ["## Figures", ""] + [_markdown_figure(result, chart, number) for chart, number in numbers.values()]
+    out += _markdown_flows(result)
     out.append(f"_{config.ORG_NAME + ' ' if config.ORG_NAME else ''}IOC investigation, generated "
                f"{datetime.now(UTC):%Y-%m-%d %H:%M} UTC. The evidence it is based on is in "
                f"{case_filename(result).removesuffix('.md')}.casefile.txt._")
@@ -133,6 +150,25 @@ def _markdown_figure(result: dict, chart: dict, number: int) -> str:
     if chart.get("caption"):
         caption += f" {chart['caption']}"
     return f"\n![{chart['title']}]({chart_filename(result, chart['id'])})\n\n{caption}\n"
+
+
+def _markdown_flows(result: dict) -> list[str]:
+    rows = flow_rows(result)
+    if not rows:
+        return []
+    out = ["## Flows around the flagged contact", "",
+           "| # | Time (UTC) | Duration | From | To | Up | Down | Remote | Likely connection |",
+           "|---|---|---|---|---|---|---|---|---|"]
+    for row in rows:
+        cells = [row["id"], row["time"], row["duration"], row["from"], row["to"], row["up"], row["down"],
+                 row["remote"], row["likely"]]
+        out.append("| " + " | ".join(c.replace("|", "/") for c in cells) + " |")
+    out.append("")
+    for ep in ((result.get("evidence") or {}).get("timeline") or {}).get("episodes", []):
+        if ep.get("other_count"):
+            out.append(f"Episode {ep['n']}, other sites in the window, not listed ({ep['other_count']}): "
+                       + ", ".join(ep["other_sites"]))
+    return out + [""]
 
 
 def write_case_files(result: dict, cases_dir: Path) -> None:
@@ -191,12 +227,104 @@ def _figure(chart: dict, number: int, element_id: str = "") -> str:
 </figure>"""
 
 
-def _report_parts(result: dict) -> tuple[str, str, str]:
-    """(the three main parts, the background, the figures), as HTML. A chart
-    the report places becomes a link; the figures themselves come at the end."""
+# --- the flow table -------------------------------------------------------------------
+
+def _span_minutes(row: dict) -> int:
+    start, end = datetime.fromisoformat(row["start"]), datetime.fromisoformat(row["end"])
+    return int((end - start).total_seconds() // 60) + 1
+
+
+def _duration(row: dict) -> str:
+    """"18 min (13 active)": first to last minute, and the minutes with traffic."""
+    span = _span_minutes(row)
+    return f"{span} min" + (f" ({row['minutes']} active)" if row["minutes"] != span else "")
+
+
+def _flow_time(row: dict, with_date: bool = True) -> str:
+    start = row["start"][:16] if with_date else row["start"][11:16]
+    return start + (f"-{row['end'][11:16]}" if row["end"][:16] != row["start"][:16] else "")
+
+
+def flow_rows(result: dict) -> list[dict]:
+    """The flow timeline as table rows: facts from the evidence, and the
+    model's note (FLOW_NOTES) on what each connection likely is."""
+    timeline = (result.get("evidence") or {}).get("timeline") or {}
+    notes = result.get("flow_notes") or {}
+    rows = []
+    for row in timeline.get("rows") or []:
+        to = casefile.remote_address(row)
+        rows.append({"id": row["id"], "episode": row["episode"], "flagged": row["flagged"],
+                     "time": _flow_time(row), "clock": _flow_time(row, with_date=False), "duration": _duration(row),
+                     "from": result["affected_asset"], "to": to,
+                     "up": analysis.fmt_bytes(row["up_bytes"]), "down": analysis.fmt_bytes(row["down_bytes"]),
+                     "remote": row["remote"], "likely": notes.get(row["id"], "")})
+    return rows
+
+
+FLOW_COLUMNS = ("#", "Time (UTC)", "Duration", "Connection", "Up", "Down", "Remote", "Likely connection")
+
+
+def _episode_row(ep: dict) -> str:
+    local = config.to_local(ep.get("start"))
+    window = ep.get("window") or ["", ""]
+    return (f"<tr class='episode'><td colspan='{len(FLOW_COLUMNS)}'>Contact episode {ep.get('n')}: "
+            f"{e(str(ep.get('start', ''))[:16])} to {e(str(ep.get('end', ''))[:16])} UTC"
+            + (f" ({e(local)})" if local else "")
+            + f"<span class='muted'> · rows from {e(window[0][11:16])} to {e(window[1][11:16])} UTC</span></td></tr>")
+
+
+def _others_row(ep: dict | None) -> str:
+    """The sites in an episode's window that are not listed, by name."""
+    if not ep or not ep.get("other_count"):
+        return ""
+    more = ep["other_count"] - len(ep["other_sites"])
+    names = ", ".join(ep["other_sites"]) + (f" and {more} more" if more > 0 else "")
+    return (f"<tr class='others'><td colspan='{len(FLOW_COLUMNS)}'><span class='muted'>Other sites in the window, not "
+            f"listed ({ep['other_count']}):</span> {e(names)}</td></tr>")
+
+
+def _flows_html(result: dict) -> str:
+    rows = flow_rows(result)
+    if not rows:
+        return ""
+    anchor = _anchor(result)
+    timeline = (result.get("evidence") or {}).get("timeline") or {}
+    episodes = {ep["n"]: ep for ep in timeline.get("episodes", [])}
+    head = "".join(f"<th{' class=num' if h in ('Up', 'Down') else ''}>{h}</th>" for h in FLOW_COLUMNS)
+    body, current = [], None
+    for row in rows:
+        if row["episode"] != current:
+            body.append(_others_row(episodes.get(current)))
+            current = row["episode"]
+            body.append(_episode_row(episodes.get(current) or {"n": current}))
+        likely = e(row["likely"]) or "<span class='muted'>-</span>"
+        body.append(
+            f"<tr id='{anchor}-flow-{row['id']}'{' class=flagged' if row['flagged'] else ''}>"
+            f"<td class='id'>{row['id']}</td><td class='nowrap'>{e(row['clock'])}</td>"
+            f"<td class='dur'>{e(row['duration'])}</td>"
+            f"<td class='conn'><span class='muted'>{e(row['from'])} &rarr;</span><br>"
+            f"{e(row['to']).replace(' (+', '<br><span class=muted>(+')}{'</span>' if ' (+' in row['to'] else ''}</td>"
+            f"<td class='num'>{e(row['up'])}</td><td class='num'>{e(row['down'])}</td>"
+            f"<td class='remote'>{e(row['remote'])}</td><td class='likely'>{likely}</td></tr>")
+    body.append(_others_row(episodes.get(current)))
+    before, after = timeline.get("pad_before", 5), timeline.get("pad_after", 2)
+    return (f"<details class='background flows' id='{anchor}-flows'><summary>Flows around the flagged contact "
+            f"({len(rows)})</summary><p class='muted small'>The host's traffic from {before} minutes before to "
+            f"{after} minutes after each contact episode (per-minute flow records), one row per site and one per "
+            "flagged address. Sites already in use before the contact and sites of a known kind are listed first; "
+            "the rest are named below each episode. Flagged rows are highlighted. Remote: the name the host used, its kind, owner and app label. Likely "
+            "connection: the analysis's reading of each row.</p><div class='table-wrap'><table class='flows'>"
+            f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div></details>")
+
+
+def _report_parts(result: dict) -> tuple[str, str]:
+    """(the four parts, the figures), as HTML. A chart the report places
+    becomes a link; the figures themselves come at the end. A flow row cited
+    as [[flow F3]] links to its row in the flow table."""
     parts = _parts(result)
     numbers = _figure_numbers(result)
     anchor = _anchor(result)
+    flow_ids = {row["id"] for row in flow_rows(result)}
 
     def reference(ref: str) -> str:
         if ref not in numbers:
@@ -208,16 +336,18 @@ def _report_parts(result: dict) -> tuple[str, str, str]:
     def label(ref: str) -> str:  # a chart named inside a sentence
         return f"[Figure {numbers[ref][1]}](#{anchor}-fig{numbers[ref][1]})" if ref in numbers else ""
 
+    def flow_link(row_id: str) -> str:
+        row_id = row_id.upper()
+        return f"[{row_id}](#{anchor}-flow-{row_id})" if row_id in flow_ids else row_id
+
     body = ""
     for key, heading in SECTIONS:
         if parts.get(key):
             css = "part lead" if key == "summary" else "part"
             body += (f"<section class='{css}'><h3>{e(heading)}</h3>"
-                     f"{mdrender.to_html(parts[key], reference, heading_offset=1, label=label)}</section>")
-    background = (mdrender.to_html(parts["background"], reference, heading_offset=1, label=label)
-                  if parts.get("background") else "")
+                     f"{mdrender.to_html(parts[key], reference, 1, label, flow_link)}</section>")
     figures = "".join(_figure(chart, number, f"{anchor}-fig{number}") for chart, number in numbers.values())
-    return body, background, figures
+    return body, figures
 
 
 def _when(value) -> str:
@@ -253,6 +383,9 @@ def _facts(result: dict) -> str:
     role = _role(result)
     if role:
         rows.append(("Likely role (analyst reading)", role))
+    user = _user(result)
+    if user:
+        rows.append(("Likely user (from its activity)", user))
     items = "".join(f"<div><dt>{e(k)}</dt><dd>{e(v)}</dd></div>" for k, v in rows)
     return f"<dl class='facts'>{items}</dl>"
 
@@ -331,10 +464,7 @@ def _case(result: dict, number: int, total: int) -> str:
     verdict = result.get("VERDICT", "SUSPICIOUS")
     category = (result.get("behaviour") or {}).get("label", "")
     check = _cross_check(result)
-    body, background, figures = _report_parts(result)
-    background_html = (f"<details class='background'><summary>Background: the host, the threat and what "
-                       f"compromise would look like</summary><div class='report'>{background}</div></details>"
-                       if background else "")
+    body, figures = _report_parts(result)
     count = len(result.get("charts") or [])
     figures_html = (f"<details class='background figures'><summary>Figures ({count})</summary>{figures}</details>"
                     if figures else "")
@@ -360,8 +490,8 @@ def _case(result: dict, number: int, total: int) -> str:
   {_also_html(result)}
   {_review_html(result)}
   <div class="report">{body}</div>
-  {background_html}
   {figures_html}
+  {_flows_html(result)}
   {_related_html(result)}
   <div class="appendices">
     <details class="appendix"><summary>Queries run during the investigation ({len(calls)})</summary>{calls_html}</details>
@@ -611,6 +741,18 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .background[open] > summary { margin-bottom: 6px; }
 .background + .background { margin-top: 10px; }
 .fig-ref { font-size: 14px; margin: -4px 0 12px; }
+table.flows { font-size: 12.5px; }
+table.flows th, table.flows td { padding: 5px 6px; }
+table.flows td.id, table.flows td.conn, table.flows td.num, table.flows td.nowrap {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
+table.flows td.dur { min-width: 64px; }
+table.flows td.remote { min-width: 170px; overflow-wrap: anywhere; }
+table.flows td.likely { min-width: 170px; }
+table.flows tr.episode td { background: var(--code-bg); font-weight: 600; color: var(--ink2); }
+table.flows tr.episode .muted { font-weight: 400; }
+table.flows tr.flagged td { background: var(--warn-bg); }
+table.flows tr.others td { font-size: 12px; color: var(--ink2); }
+table.flows tr:target td { box-shadow: inset 0 2px var(--accent), inset 0 -2px var(--accent); }
 .fig-ref a::before { content: "\\2193  "; }
 .report p, .report ul, .report ol, .report blockquote { max-width: 78ch; }
 .report h3 { font-size: 17px; margin: 22px 0 8px; }

@@ -127,6 +127,10 @@ ROLE_EVIDENCE = (
     (("develop",), ("software development",), ()),
     (("media", "stream"), ("self-hosted media", "streaming or social media"), ("Video", "Music", "Live Video")),
     (("home lab", "homelab", "self-host"), ("home lab or self-hosted services",), ()),
+    # Who uses it: a student's (personal) device needs signs of personal use or study.
+    (("student", "personal"), knowledge.USER_EVIDENCE["student"],
+     ("Video", "Music", "Live Video", "Gameplay", "Gaming Download", "Social Media")),
+    (("staff",), knowledge.USER_EVIDENCE["staff"], ()),
 )
 # Roles no evidence in this data can support.
 UNSUPPORTED_ROLE_WORDS = ("research", "experiment", "iot", "camera", "printer", "smart tv", "kiosk")
@@ -134,8 +138,11 @@ UNSUPPORTED_ROLE_WORDS = ("research", "experiment", "iot", "camera", "printer", 
 
 def role_unsupported(role: str, ev: dict) -> bool:
     """True if the role names something the evidence does not show: each role
-    word needs matching activity hints or app categories."""
+    word needs matching activity hints or app categories, or the role must name
+    a site the host used (the hint lists are short)."""
     text = role.lower()
+    if any(site in text for site in host_sites(ev)):
+        return any(w in text for w in UNSUPPORTED_ROLE_WORDS)
     other = ev.get("other_traffic", {}) or {}
     hints = set((other.get("activity_hints") or {}).keys())
     categories = {c["category"] for c in (ev.get("host_apps") or {}).get("categories", [])}
@@ -147,7 +154,7 @@ def role_unsupported(role: str, ev: dict) -> bool:
 
 # Where-is-it words: the data never says which network a host is on, so a role
 # may only use one if the host's own name contains it.
-LOCATION_WORDS = ("residential", "residence", "dorm", "college", "student", "staff", "office", "lab",
+LOCATION_WORDS = ("residential", "residence", "dorm", "college", "office", "lab",
                   "library", "campus", "wifi", "wireless", "guest")
 
 
@@ -155,6 +162,48 @@ def role_guesses_location(role: str, hostname: str | None) -> bool:
     text = role.lower()
     name = (hostname or "").lower()
     return any(word in text and word not in name for word in LOCATION_WORDS)
+
+
+USER_TYPES = ("student", "staff", "unclear")
+
+
+def user_type(text: str) -> str:
+    """The LIKELY_USER reading's first word: student, staff or unclear."""
+    first = (text or "").strip().lower().split(" ", 1)[0].strip(".,:;-*")
+    return first if first in USER_TYPES else ""
+
+
+def usage_kinds(ev: dict) -> set[str]:
+    other = ev.get("other_traffic") or {}
+    profile = {c["category"] for c in (other.get("activity_profile") or {}).get("categories") or []}
+    return profile | set((other.get("activity_hints") or {}).keys())
+
+
+def host_sites(ev: dict) -> set[str]:
+    """Root domains the host itself used, from its traffic summary."""
+    other = ev.get("other_traffic") or {}
+    profile = other.get("activity_profile") or {}
+    sites = {site["domain"] for c in profile.get("categories") or [] for site in c["sites"]}
+    sites |= {site["domain"] for site in profile.get("unlisted") or []}
+    sites |= set(other.get("domains_by_active_minutes") or [])
+    sites |= {d["root_domain"] for d in other.get("top_destinations_by_bytes") or []}
+    return {s.lower() for s in sites if s and not s.startswith("(")}
+
+
+def user_problem(text: str, ev: dict) -> bool:
+    """True if a student or staff reading has nothing behind it: neither a
+    listed kind of use (knowledge.USER_EVIDENCE) nor a site the host used named
+    in the reason (the lists are short; the model judges other sites by name).
+    "unclear" always stands."""
+    kind = user_type(text)
+    if not kind:
+        return True
+    if kind == "unclear":
+        return False
+    if usage_kinds(ev) & set(knowledge.USER_EVIDENCE[kind]):
+        return False
+    lowered = text.lower()
+    return not any(site in lowered for site in host_sites(ev))
 
 
 def role_problem(role: str, ev: dict) -> bool:

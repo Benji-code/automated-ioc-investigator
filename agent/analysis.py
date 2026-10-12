@@ -395,6 +395,56 @@ def _service_for(domain: str | None, port, protocol: str | None) -> dict | None:
     return {"service": match["key"], "matched_on": match["matched_on"]}
 
 
+MAX_PROFILE_SITES = 4
+MAX_UNLISTED_SITES = 15
+NOT_A_SITE = ("(no domain)", "cloudflare-ech.com")  # no name, or the ECH placeholder
+
+
+def activity_label(domain: str) -> str | None:
+    """The kind of use a root domain shows (knowledge.HOST_ACTIVITY_HINTS), if any."""
+    domain = domain.lower()
+    for label, markers in knowledge.HOST_ACTIVITY_HINTS.items():
+        if any(domain == m or domain.endswith("." + m) for m in markers):
+            return label
+    return None
+
+
+def activity_profile(activity: pd.DataFrame) -> dict:
+    """What the host spends its traffic on: per kind of use (adult content,
+    gaming, ...), its bytes, share of all the host's traffic, active minutes
+    and busiest sites. A reading of the traffic, never proof of who uses it."""
+    if activity is None or activity.empty:
+        return {"total_bytes": 0, "categories": []}
+    frame = activity.assign(total=activity["up_bytes"] + activity["down_bytes"])
+    total = int(frame["total"].sum())
+    per_domain = frame.groupby("root_domain").agg(bytes=("total", "sum"), minutes=("minutes", "sum"))
+    categories: dict[str, dict] = {}
+    unlisted: list[dict] = []
+    for domain, row in per_domain.sort_values("bytes", ascending=False).iterrows():
+        if not domain or domain in NOT_A_SITE:
+            continue
+        label = activity_label(str(domain))
+        if not label:
+            # Skip IP fragments SuperNetFlow stores as a domain ("116.9"), and
+            # sites on the other lists (ad networks, OS services).
+            if str(domain).replace(".", "").isdigit() or knowledge.destination_kind(str(domain)):
+                continue
+            if len(unlisted) < MAX_UNLISTED_SITES:
+                unlisted.append({"domain": str(domain), "bytes": int(row["bytes"]),
+                                 "share": round(int(row["bytes"]) / total, 3) if total else 0.0})
+            continue
+        entry = categories.setdefault(label, {"category": label, "bytes": 0, "minutes": 0, "sites": []})
+        entry["bytes"] += int(row["bytes"])
+        entry["minutes"] += int(row["minutes"])
+        if len(entry["sites"]) < MAX_PROFILE_SITES:
+            entry["sites"].append({"domain": str(domain), "bytes": int(row["bytes"])})
+    rows = sorted(categories.values(), key=lambda c: -c["bytes"])
+    for entry in rows:
+        entry["share"] = round(entry["bytes"] / total, 3) if total else 0.0
+    # The lists are short: the busiest other sites go to the model to judge by name.
+    return {"total_bytes": total, "categories": rows, "unlisted": unlisted}
+
+
 def summarise_other_traffic(activity: pd.DataFrame, long_flows: pd.DataFrame) -> dict:
     """Host's traffic to everything except the flagged IP(s): top destinations,
     long-lived flows elsewhere, and destinations matching a known service."""
@@ -406,6 +456,7 @@ def summarise_other_traffic(activity: pd.DataFrame, long_flows: pd.DataFrame) ->
         "service_matches": [],
         "platform_hints": {},
         "activity_hints": {},
+        "activity_profile": {"total_bytes": 0, "categories": []},
     }
     services: dict[str, dict] = {}
 
@@ -452,6 +503,7 @@ def summarise_other_traffic(activity: pd.DataFrame, long_flows: pd.DataFrame) ->
         result["distinct_root_domains"] = sum(1 for d in minutes_by_domain.index if d != "(no domain)")
         result["platform_hints"] = platform_hints(d for d in minutes_by_domain.index if d != "(no domain)")
         result["activity_hints"] = activity_hints(d for d in minutes_by_domain.index if d != "(no domain)")
+        result["activity_profile"] = activity_profile(activity)
 
         busiest = activity.assign(total=activity["up_bytes"] + activity["down_bytes"]).sort_values("total")
         ip_to_domain = dict(zip(busiest["server_ip"].astype(str), busiest["root_domain"]))

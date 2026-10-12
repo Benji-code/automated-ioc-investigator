@@ -5,7 +5,8 @@ bullet and numbered lists (one level of nesting), tables, block quotes,
 code blocks, rules, **bold**, *italic*, `code` and http(s) links. All text
 is HTML-escaped first, so nothing the model writes becomes markup. A line
 holding only [[chart <id>]] is replaced by that chart (a ready-made chart's
-name, or a number for the model's own).
+name, or a number for the model's own). [[flow F3]] (or [[flow F3-F5]])
+cites rows of the flow timeline and becomes links to the flow table.
 """
 from __future__ import annotations
 
@@ -20,6 +21,8 @@ BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
 NUMBERED_RE = re.compile(r"^(\s*)\d+[.)]\s+(.*)$")
 TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 RULE_RE = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
+FLOW_REF_RE = re.compile(r"\[\[\s*flows?\s*:?\s*([^\]]*?)\s*\]\]", re.I)
+FLOW_ID_RE = re.compile(r"\bF(\d+)\b", re.I)
 
 
 def inline(text: str) -> str:
@@ -121,13 +124,27 @@ def isolate_charts(text: str, label: Callable[[str], str] | None = None) -> str:
     return "\n".join(out)
 
 
+def flow_refs(text: str) -> list[str]:
+    """Flow rows the text cites, e.g. ["F3", "F5"] (the ends of a range)."""
+    return [f"F{n}" for inner in FLOW_REF_RE.findall(text) for n in FLOW_ID_RE.findall(inner)]
+
+
+def replace_flow_refs(text: str, link: Callable[[str], str] | None = None) -> str:
+    """[[flow F3-F5]] -> "F3-F5", each id passed through `link` (e.g. to a
+    Markdown link to the table row)."""
+    def ids(match: re.Match) -> str:
+        return FLOW_ID_RE.sub(lambda m: link(f"F{m.group(1)}") if link else f"F{m.group(1)}", match.group(1))
+    return FLOW_REF_RE.sub(ids, text)
+
+
 def to_html(text: str, chart_html: Callable[[str], str] | None = None, heading_offset: int = 1,
-            label: Callable[[str], str] | None = None) -> str:
+            label: Callable[[str], str] | None = None, flow_link: Callable[[str], str] | None = None) -> str:
     """Markdown to HTML. Headings are shifted down by heading_offset (a '#'
     in the report becomes <h2> with the default) and capped at <h5>. A chart
     on its own line goes through chart_html; one inside a sentence through
-    label (see isolate_charts)."""
-    lines = isolate_charts(text, label).split("\n")
+    label (see isolate_charts). Flow ids cited with [[flow F3]] go through
+    flow_link."""
+    lines = isolate_charts(replace_flow_refs(text, flow_link), label).split("\n")
     out: list[str] = []
     paragraph: list[str] = []
     i = 0

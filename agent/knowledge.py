@@ -512,7 +512,65 @@ HOST_ACTIVITY_HINTS: dict[str, tuple[str, ...]] = {
         "youtube.com", "googlevideo.com", "netflix.com", "nflxvideo.net", "spotify.com", "tiktokcdn.com",
         "tiktokv.com", "instagram.com", "facebook.com", "fbcdn.net", "twitch.tv", "discord.com", "discord.gg",
     ),
+    # Personal use: on a university network this points to someone's own
+    # device (e.g. a student's), not a lab or office machine.
+    "adult content": (
+        "pornhub.com", "phncdn.com", "xvideos.com", "xvideos-cdn.com", "xnxx.com", "xhamster.com", "xhcdn.com",
+        "youporn.com", "redtube.com", "rdtcdn.com", "spankbang.com", "eporner.com", "stripchat.com",
+        "doppiocdn.com", "strpst.com", "chaturbate.com", "mmcdn.com", "bongacams.com", "livejasmin.com", "cam4.com",
+        "myfreecams.com", "onlyfans.com", "camsoda.com", "cambaddies.com", "prncams.com",
+    ),
+    # Coursework help sites: a student's device.
+    "study help": (
+        "chegg.com", "coursehero.com", "quizlet.com", "studocu.com", "quillbot.com", "edstem.org",
+        "gradescope.com", "piazza.com", "wolframalpha.com", "grammarly.com", "kahoot.it",
+    ),
+    # Workplace tools that students rarely use on their own devices.
+    "work and collaboration": (
+        "slack.com", "atlassian.net", "atlassian.com", "servicenow.com", "service-now.com", "workday.com",
+        "salesforce.com", "webex.com", "docusign.net", "docusign.com", "smartsheet.com", "monday.com",
+    ),
 }
+
+# Which kinds of use point to which likely user (the model's LIKELY_USER is
+# checked against these). Pornography, gaming and the like point to a
+# student's own device on a university network; workplace tools to staff.
+USER_EVIDENCE = {
+    "student": ("adult content", "gaming", "streaming or social media", "self-hosted media", "study help"),
+    "staff": ("work and collaboration",),
+}
+
+# Well-known ad networks and ad exchanges, including the pop-up and redirect
+# networks common on adult and streaming sites. A flagged domain contacted in
+# the same minute as these is often an ad the page loaded, not a choice.
+AD_NETWORK_DOMAINS = (
+    "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adnxs.com", "criteo.com",
+    "rubiconproject.com", "pubmatic.com", "openx.net", "adsrvr.org", "amazon-adsystem.com", "taboola.com",
+    "outbrain.com", "exoclick.com", "exosrv.com", "magsrv.com", "realsrv.com", "tsyndicate.com",
+    "trafficjunky.com", "trafficjunky.net", "juicyads.com", "adsterra.com", "popads.net", "popcash.net",
+    "propellerads.com", "hilltopads.net", "clickadu.com", "trafficfactory.biz", "plugrush.com",
+)
+
+
+def _listed(domain: str, markers) -> bool:
+    return any(domain == m or domain.endswith("." + m) for m in markers)
+
+
+def destination_kind(domain: str | None) -> str:
+    """A short label for a destination domain from the lists above ("ad
+    network", "adult content", "windows services"), or "" if none fits."""
+    domain = (domain or "").lower().strip(".")
+    if not domain:
+        return ""
+    if _listed(domain, AD_NETWORK_DOMAINS):
+        return "ad network"
+    for label, markers in HOST_ACTIVITY_HINTS.items():
+        if _listed(domain, markers):
+            return label
+    for platform, markers in PLATFORM_HINT_DOMAINS.items():
+        if _listed(domain, markers):
+            return f"{platform} services"
+    return ""
 
 # ASN organisations whose IPs are shared front-ends for many unrelated sites.
 SHARED_FRONTEND_ASN_KEYWORDS = ("cloudflare", "akamai", "fastly", "incapsula", "cdn77", "edgecast")

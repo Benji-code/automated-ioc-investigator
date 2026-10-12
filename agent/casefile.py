@@ -76,6 +76,32 @@ ThreatFox confidence: {identity['threatfox_confidence']}/100
 {intel}"""
 
 
+def _usage_section(other: dict) -> str:
+    """What the host is used for, by kind of use, with volumes and the main sites."""
+    header = "[STEP 1b] WHAT THE HOST IS USED FOR (its own traffic, sites grouped by kind of use from a local list)"
+    if "error" in other:
+        return f"{header}\n{_error_line(other)}"
+    profile = other.get("activity_profile") or {}
+    window = (other.get("window") or {}).get("subscriber_activity_1m", "")
+    if not profile.get("total_bytes"):
+        return f"{header}\n  No per-minute traffic for the host in {window or 'the window'}."
+    lines = [header, f"  ({SA}, {window}; all its traffic: {fmt_bytes(profile['total_bytes'])}. A reading of the "
+                     "traffic, not proof of who uses the machine.)"]
+    for c in profile.get("categories") or []:
+        sites = ", ".join(f"{site['domain']} {fmt_bytes(site['bytes'])}" for site in c["sites"])
+        share = f"{c['share']:.0%}" if c["share"] >= 0.01 else "under 1%"
+        lines.append(f"    - {c['category']}: {fmt_bytes(c['bytes'])} ({share} of all its traffic), "
+                     f"{c['minutes']} active minute(s); main sites: {sites}")
+    if not profile.get("categories"):
+        lines.append("    (none of its sites is on the local lists of kinds of use)")
+    unlisted = profile.get("unlisted") or []
+    if unlisted:
+        sites = ", ".join(f"{site['domain']} {fmt_bytes(site['bytes'])}" for site in unlisted)
+        lines.append(f"  Busiest sites NOT on the lists (the lists are short; judge what these are from their "
+                     f"names): {sites}")
+    return "\n".join(lines)
+
+
 def _asn_line(info: dict) -> str:
     parts = [f"ASN {info['asn'] or '?'} {info['asn_org'] or ''}".strip()]
     if info.get("source"):
@@ -494,6 +520,54 @@ def _contact_section(contact: dict) -> str:
     return "\n".join(lines)
 
 
+def remote_address(row: dict) -> str:
+    """"203.0.113.5:443/tcp (+2 more IPs)", or a note when no IP was recorded."""
+    if not row["server_ip"]:
+        return "(server IP not recorded)"
+    extra = row.get("ip_count", 1) - 1
+    return f"{row['server_ip']}:{row['port']}/{row['protocol']}" + (f" (+{extra} more IPs)" if extra > 0 else "")
+
+
+def _timeline_row(row: dict) -> str:
+    when = row["start"][11:16] + (f"-{row['end'][11:16]}" if row["end"] != row["start"] else "")
+    return (f"    {row['id']} {when} ({row['minutes']} active min) {remote_address(row)}  {row['remote']}; "
+            f"up {fmt_bytes(row['up_bytes'])}, down {fmt_bytes(row['down_bytes'])}, {row['flows']} flow(s)")
+
+
+def _timeline_section(timeline: dict | None) -> str:
+    header = "[STEP 5e] FLOW TIMELINE AROUND THE CONTACT (what else the host was doing at the same moments)"
+    timeline = timeline or {}
+    if "error" in timeline:
+        return f"{header}\n{_error_line(timeline)}"
+    if not timeline.get("episodes"):
+        return f"{header}\n  (no contact times to look around)"
+    before, after = timeline.get("pad_before", 5), timeline.get("pad_after", 2)
+    lines = [header,
+             f"  ({SA}: the host's traffic from {before} min before to {after} min after each contact episode, one "
+             "row per site (all its names, IPs and ports) and one row per flagged address (every name seen on it), "
+             "earliest first. Listed first: sites already in use before the contact and sites of a known kind "
+             "(adult content, ad network, ...); the rest are named at the end of the episode. Rows labelled Web "
+             f"Browsing have no server IP. {timeline.get('episode_count', 0)} contact episode(s) in all; the first, "
+             "the largest and the last are shown.)",
+             "  Read the order: what was open just before the contact usually explains it. Cite rows in the report "
+             "as [[flow F3]] and give every row a short note in FLOW_NOTES."]
+    for ep in timeline["episodes"]:
+        local = _local_pair(ep["start"], ep["end"], sep=" to ")
+        lines.append(f"  Episode {ep['n']}: contact {ep['start']} to {ep['end']} UTC{local}, {ep['bursts']} burst(s); "
+                     f"window {ep['window'][0]} to {ep['window'][1]} UTC")
+        if ep.get("expired"):
+            lines.append("    (per-minute data no longer covers this time: about 15 days are kept)")
+            continue
+        lines.append(f"    {ep.get('sites', 0)} site(s) in the window, {ep.get('flagged', 0)} of them flagged "
+                     f"address(es); {ep['shown']} listed:")
+        lines.extend(_timeline_row(r) for r in timeline["rows"] if r["episode"] == ep["n"])
+        if ep.get("other_count"):
+            more = ep["other_count"] - len(ep["other_sites"])
+            lines.append(f"    Other sites in the window, not listed ({ep['other_count']}, largest first): "
+                         + ", ".join(ep["other_sites"]) + (f" and {more} more" if more > 0 else ""))
+    return "\n".join(lines)
+
+
 def _apps_section(app_context: dict, host_apps: dict) -> str:
     header = "[STEP 5d] APPS AND PLATFORM"
     lines = [header, "  (from app_subscriber_server_enriched_5m, ux_sessions, app_server_enriched_1h and "
@@ -656,7 +730,8 @@ def _charts_section(options: list[dict]) -> str:
         return "READY-MADE CHARTS: none (too little data); use add_chart for your own.\n\n"
     lines = "\n".join(f"  - {charts.describe(c)}" for c in options)
     return ("READY-MADE CHARTS (built from the evidence above; place 1-3 in the report, each on its own line, "
-            f"e.g. [[chart {options[0]['id']}]]):\n{lines}\n\n")
+            f"e.g. [[chart {options[0]['id']}]], then say in your own words what it shows; do not copy these "
+            f"descriptions into the report):\n{lines}\n\n")
 
 
 DATA_LIMITATIONS = [
@@ -682,6 +757,8 @@ ThreatFox confidence rates the indicator, not this host.
 
 {_ioc_section(ev['identity'], ev.get('host'))}
 
+{_usage_section(ev.get('other_traffic') or {})}
+
 {_ips_section(ev['server_ips'], ev['flows'], ev.get('asn'))}
 
 {_expected_section(ev['identity'], ev['expected'])}
@@ -693,6 +770,8 @@ ThreatFox confidence rates the indicator, not this host.
 {_names_section(ev.get('names', {"source": "none", "names": []}))}
 
 {_contact_section(ev.get('contact') or {"pattern": "insufficient_data", "description": "not run", "features": {}})}
+
+{_timeline_section(ev.get('timeline'))}
 
 {_apps_section(ev.get('app_context') or {}, ev.get('host_apps') or {})}
 
