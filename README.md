@@ -31,48 +31,56 @@ leaves the network.
 ## How it works
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 22, "rankSpacing": 42}}}%%
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 40}}}%%
 flowchart LR
-    s1["1 · Group the feed<br/>into cases"] --> gather
+    feed["IOC match feed<br/>ThreatFox indicator + campus host"] --> cases["One case per<br/>host and indicator"]
+    cases --> gather
 
     subgraph gather["Gather evidence (code)"]
         direction TB
-        s2["2 · Flagged address<br/>owner, shared or not"]
-        s3["3 · Expected behaviour<br/>threat, malware, services"]
-        s4["4 · The contact<br/>flows, names, pattern"]
-        s5["5 · Timeline around<br/>each contact"]
-        s6["6 · Host profile<br/>usage, uptime, DNS"]
-        s7["7 · Host type<br/>vs typical hosts"]
-        s8["8 · Campus view<br/>other hosts and sites"]
-        s2 --> s3 --> s4 --> s5 --> s6 --> s7 --> s8
+        g1["Flagged address<br/>owner, shared or dedicated"]
+        g2["Flows, site names and<br/>contact pattern"]
+        g3["Timeline of the host's<br/>traffic around each contact"]
+        g4["Host profile<br/>type, usage, uptime"]
+        g1 ~~~ g2 ~~~ g3 ~~~ g4
     end
 
-    gather --> s9["9 · Rule-based<br/>baseline verdict"]
-    gather --> s10
+    gather --> investigate
+    gather --> rules["Rule-based<br/>verdict"]
 
     subgraph investigate["Investigate (LLM agent)"]
-        s10["10 · Read the evidence,<br/>query, pick charts,<br/>write the report"]
+        direction TB
+        m1["Reads the evidence"]
+        m2["Runs follow-up queries<br/>and picks charts"]
+        m3["Writes the report<br/>and a verdict"]
+        m1 --> m2 --> m3
     end
+
+    investigate --> check
 
     subgraph check["Check (code)"]
-        s11{"11 · Numbers, claims<br/>and cross-check<br/>hold up?"}
+        direction TB
+        c1{"Every number found<br/>in the evidence?"}
+        c2{"Agrees with the<br/>rule-based verdict?"}
+        c1 -- yes --> c2
     end
 
-    s10 --> s11
-    s9 -. "never shown<br/>to the model" .-> s11
-    s11 -- yes --> s12["12 · HTML report"]
-    s11 -- "no" --> s12r["12 · HTML report,<br/>marked for review"]
+    rules -. "never shown<br/>to the model" .-> c2
+    check -. "problems found:<br/>one revision pass" .-> investigate
+    c2 -- yes --> done["Report<br/>verdict stands"]
+    c1 -- no --> review["Report marked for<br/>analyst review"]
+    c2 -- no --> review
 
     classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
     classDef model fill:#fff4d6,stroke:#c98a00,color:#111
     classDef io fill:#f2f2f2,stroke:#777,color:#111
     classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
     classDef warn fill:#fdecea,stroke:#c0392b,color:#111
-    class s2,s3,s4,s5,s6,s7,s8,s9,s11 code
-    class s10 model
-    class s1 io
-    class s12 good
-    class s12r warn
+    class g1,g2,g3,g4,c1,c2,rules code
+    class m1,m2,m3 model
+    class feed,cases io
+    class done good
+    class review warn
     style gather fill:none,stroke:#3b6fd4
     style investigate fill:none,stroke:#c98a00
     style check fill:none,stroke:#3b6fd4
