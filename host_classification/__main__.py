@@ -70,7 +70,7 @@ def cmd_train(args) -> None:
     print("Most important features:")
     for name, value in bundle["importance"][:12]:
         print(f"  {name:<40} {value}")
-    print("With few seeds these labels are pseudo-labels: add verified seeds and retrain.")
+    print("With few seeds these labels are pseudo-labels: add more seeds and retrain.")
 
 
 def cmd_label(args) -> None:

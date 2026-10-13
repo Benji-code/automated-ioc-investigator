@@ -24,10 +24,12 @@ would look like are in `agent/knowledge.py` (`HOST_TYPE_PROFILES`).
 Real campus IPs never go in this folder: seed labels, features, the model
 and the profiles all live in `data/host_classification/` (gitignored).
 
-1. Seed labels: verified hosts in `data/host_classification/seed_labels.csv`
-   (format: `seed_labels.example.csv`; columns `ip,label,coarse_label,certainty,reason`).
+1. Seed labels: weakly supervised labels for a small set of hosts in
+   `data/host_classification/seed_labels.csv`, each with a certainty that
+   weights it in training (format: `seed_labels.example.csv`; columns
+   `ip,label,coarse_label,certainty,reason`).
 2. Set `CAMPUS_CIDR` in `.env` (the ClickHouse settings come from there too).
-3. Run everything for one recent week (the seeds must be verified for that
+3. Run everything for one recent week (the seeds must still be current for that
    period: see "Seeds go stale" below):
 
    ```bash
@@ -82,9 +84,9 @@ suggests those addresses have been reassigned since they were labelled.
   `long_flow_summary` keeps about 65 days, so verify seeds against recent
   traffic and extract the same period.
 
-- **Few seeds.** With a few dozen verified hosts the forest's labels are
-  pseudo-labels. Hosts below the review threshold are marked
-  `needs_manual_review`; verify some and add them to the seeds.
+- **Few, noisy seeds.** The forest learns from a few dozen weakly labelled
+  hosts, so its labels are pseudo-labels. Hosts below the review threshold
+  are marked `needs_manual_review`; check some and add them to the seeds.
 - **Large flows only.** The flow features come from `long_flow_summary`
   (flows over 1 MB), so a quiet host can have none.
 - **Rule thresholds are judgement calls** (`classify.rule_classify`). Check them

@@ -75,7 +75,7 @@ def assess_host(host: str, identity: dict, hostname: str | None, days: int | Non
     if bundle:
         scored = classify.predict(bundle, frame).iloc[0]
         label, confidence = scored["model_label"], float(scored["model_score"])
-        method = f"random forest trained on {bundle.get('seeds', '?')} verified hosts"
+        method = f"random forest trained on {bundle.get('seeds', '?')} weakly labelled seed hosts"
         alternatives = scored["model_probabilities"]
     else:
         label, confidence = rule_label, rule_confidence

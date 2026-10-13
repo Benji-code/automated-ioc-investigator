@@ -2,8 +2,9 @@
 
 Two classifiers over the features in features.py:
 
-  - a random forest trained on hand-verified seed labels (refined from the
-    original classification.py). The seeds hold real campus IPs, so they live
+  - a random forest trained on weakly supervised labels: a small set of
+    seed hosts, each with a certainty that weights it in training (refined
+    from the original classification.py). The seeds hold real campus IPs, so they live
     in a gitignored CSV (config.HOST_SEED_LABELS_PATH); seed_labels.example.csv
     shows the format. The trained model is saved with the exact feature
     columns it was fitted on, so a single case host is scored the same way.
@@ -15,7 +16,7 @@ Labels (the seeds' fine labels): end_host, NAT_gateway, website_server,
 web_proxy, remote_computing_server, non_typical_tcp_server. Profiles of what
 each normally looks like are in agent/knowledge.py (HOST_TYPE_PROFILES).
 
-With a few dozen seeds the forest's labels are pseudo-labels: add verified
+With a few dozen seeds the forest's labels are pseudo-labels: add more
 seeds and retrain. scikit-learn is only needed to train or apply the forest.
 """
 from __future__ import annotations
@@ -45,11 +46,11 @@ WEB_PORTS = {80, 443, 8000, 8008, 8080, 8443, 8888}
 # --- seeds ----------------------------------------------------------------------------------
 
 def load_seeds(path: Path | None = None) -> pd.DataFrame:
-    """ip,label[,coarse_label,certainty,reason] for hand-verified hosts."""
+    """ip,label[,coarse_label,certainty,reason] for the seed hosts."""
     path = Path(path or config.HOST_SEED_LABELS_PATH)
     if not path.exists():
         raise SystemExit(f"No seed labels at {path}. Copy host_classification/seed_labels.example.csv there and "
-                         "fill in verified hosts (real IPs stay in data/, which is gitignored).")
+                         "fill in seed hosts (real IPs stay in data/, which is gitignored).")
     seeds = pd.read_csv(path)
     missing = {"ip", "label"} - set(seeds.columns)
     if missing:
