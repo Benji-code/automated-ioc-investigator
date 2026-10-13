@@ -12,6 +12,108 @@ per case.
 The agent has no internet access. It works only from the feed, ClickHouse and
 a local knowledge base of threat, malware and service profiles.
 
+## How it works
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 40}}}%%
+flowchart LR
+    feed["IOC match feed<br/>ThreatFox indicator + campus host"] --> cases["One case per<br/>host and indicator"]
+    cases --> gather
+
+    subgraph gather["1 · Gather evidence (code)"]
+        direction TB
+        g1["Flagged address<br/>owner, shared or dedicated"]
+        g2["Flows, site names and<br/>contact pattern"]
+        g3["Timeline of the host's<br/>traffic around each contact"]
+        g4["Host profile<br/>type, usage, uptime"]
+        g1 ~~~ g2 ~~~ g3 ~~~ g4
+    end
+
+    gather --> investigate
+
+    subgraph investigate["2 · Investigate (LLM agent)"]
+        direction TB
+        m1["Reads the evidence<br/>without the rules' verdict"]
+        m2["Runs follow-up queries<br/>and picks charts"]
+        m3["Writes the report<br/>and a verdict"]
+        m1 --> m2 --> m3
+    end
+
+    investigate --> check
+
+    subgraph check["3 · Check (code)"]
+        direction TB
+        c1{"Every number found<br/>in the evidence?"}
+        c2{"Agrees with the<br/>rule-based verdict?"}
+        c1 -- yes --> c2
+    end
+
+    check -. "problems found:<br/>one revision pass" .-> investigate
+    c2 -- yes --> done["Report<br/>verdict stands"]
+    c1 -- no --> review["Report marked for<br/>analyst review"]
+    c2 -- no --> review
+
+    classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
+    classDef model fill:#fff4d6,stroke:#c98a00,color:#111
+    classDef io fill:#f2f2f2,stroke:#777,color:#111
+    classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
+    classDef warn fill:#fdecea,stroke:#c0392b,color:#111
+    class g1,g2,g3,g4,c1,c2 code
+    class m1,m2,m3 model
+    class feed,cases io
+    class done good
+    class review warn
+    style gather fill:none,stroke:#3b6fd4
+    style investigate fill:none,stroke:#c98a00
+    style check fill:none,stroke:#3b6fd4
+```
+
+## Architecture
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 40}}}%%
+flowchart TB
+    db[("SuperNetFlow<br/>campus flow records in ClickHouse")]
+
+    subgraph hc["Host classification"]
+        direction TB
+        rf["Random forest<br/>weakly supervised labels"] --> prof["Host type and<br/>its normal range"]
+    end
+
+    subgraph feed["Threat feed (upstream)"]
+        direction TB
+        tf["ThreatFox<br/>indicators"] --> match["Matched against<br/>campus traffic"]
+    end
+
+    subgraph core["Investigation agent"]
+        direction TB
+        kb["Knowledge base<br/>malware, services, sites"] --> ev["Evidence gathering<br/>fixed queries and analysis"]
+        ev --> llm["LLM agent<br/>local Ollama model"]
+        llm --> fc["Fact check and<br/>rule-based cross-check"]
+    end
+
+    db --> hc
+    db --> feed
+    db --> ev
+    llm -. "guarded read-only SQL" .-> db
+    prof --> ev
+    match --> ev
+    fc --> rep["HTML report<br/>verdict, charts, flow table"]
+    rep --> analyst(["Security analyst<br/>makes the final call"])
+
+    classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
+    classDef model fill:#fff4d6,stroke:#c98a00,color:#111
+    classDef data fill:#f2f2f2,stroke:#777,color:#111
+    classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
+    class rf,prof,kb,ev,fc,tf,match code
+    class llm model
+    class db,rep data
+    class analyst good
+    style hc fill:none,stroke:#3b6fd4
+    style feed fill:none,stroke:#3b6fd4
+    style core fill:none,stroke:#c98a00
+```
+
 ## Workflow
 
 Each case follows the same ten steps. "Auto" steps are plain Python and always
