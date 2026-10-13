@@ -258,3 +258,28 @@ docs/                   design notes and the data schema
 
 For the full list of signals, checks and tools, see
 [docs/how-it-works.md](docs/how-it-works.md).
+
+## Future improvements
+
+The agent only investigates what the feed hands it, and right now that's
+ThreatFox alone. That has two consequences:
+
+- **It only knows what's already been reported.** ThreatFox is
+  community-driven, so coverage leans towards some malware families, new
+  infrastructure appears only after someone spots and submits it, and many
+  entries are shared addresses (CDNs, cloud hosting) that match plenty of
+  innocent traffic.
+- **It can't find what nobody has listed.** A host talking to a command
+  server that isn't on any list never becomes a case, however strange its
+  traffic looks.
+
+Two natural next steps:
+
+- **More threat feeds.** Indicators from other sources, such as abuse.ch's
+  URLhaus and Feodo Tracker, Spamhaus or a MISP instance, normalised into the
+  same case format, so the investigation could stay largely as it is.
+- **An anomaly detection flow.** Much of the groundwork exists: per-type
+  profiles of normal host behaviour and a per-minute beacon detector. Running
+  those across all campus hosts, rather than only flagged ones, would raise
+  cases with no indicator at all, which the same agent could then
+  investigate.
