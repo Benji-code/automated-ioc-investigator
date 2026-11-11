@@ -12,6 +12,7 @@ checked against the service's source code or documentation.
 from __future__ import annotations
 
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -591,14 +592,63 @@ def protocol_name(number) -> str:
         return str(number)
 
 
-def get_profile(malware: str | None, threat_type: str | None) -> dict:
-    """Malware family and threat type profiles for one case."""
+def briefing_profile(briefing: dict) -> dict:
+    """Profiles from an analyst-supplied threat description (agent/briefing.py)."""
+    notes = briefing["summary"]
+    if briefing.get("cves"):
+        notes += f" CVEs: {', '.join(briefing['cves'])}."
+    source = briefing.get("source", "analyst-supplied threat description")
+    return {
+        "malware_profile": {"family": briefing["name"], "notes": notes, "source": source,
+                            "victim_traffic": briefing["victim_traffic"]},
+        "threat_type_profile": {
+            "ioc_role": "indicator named in an analyst-supplied threat description",
+            "match_means": "the host may be affected by the described threat",
+            "victim_traffic": briefing["victim_traffic"],
+            "expected_traffic_shape": briefing["expected_traffic_shape"],
+            "expected_recurrence": briefing["expected_recurrence"],
+            "false_positive_pattern": briefing["false_positive_pattern"],
+            "source": source,
+        },
+        "briefing": {"slug": briefing.get("slug"), "name": briefing["name"],
+                     "references": briefing.get("references") or []},
+    }
+
+
+def get_profile(malware: str | None, threat_type: str | None, threat_ref: str | None = None) -> dict:
+    """Malware family and threat type profiles for one case. A threat
+    briefing named by threat_ref (intel.threat_ref) comes before the built-in
+    profiles."""
+    if threat_ref:
+        from . import briefing as briefings  # lazy: briefing imports the LLM client
+
+        found = briefings.load(threat_ref)
+        if found:
+            return briefing_profile(found)
     malware_key = (malware or "").strip().lower()
     threat_key = (threat_type or "").strip().lower()
     return {
         "malware_profile": MALWARE_PROFILES.get(malware_key, DEFAULT_MALWARE_PROFILE),
         "threat_type_profile": THREAT_TYPE_PROFILES.get(threat_key, DEFAULT_THREAT_TYPE_PROFILE),
     }
+
+
+def _squashed(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def malware_key(name: str) -> str:
+    """A family name as a MALWARE_PROFILES key where one fits ('NanoCore' or
+    'NanoCore RAT' -> 'win.nanocore'); otherwise the name as given."""
+    name = (name or "").strip()
+    if name.lower() in MALWARE_PROFILES:
+        return name.lower()
+    squashed = _squashed(name)
+    for key, profile in MALWARE_PROFILES.items():
+        family = _squashed(profile.get("family", "").split("(")[0])
+        if squashed and squashed in (_squashed(key.split(".", 1)[-1]), family):
+            return key
+    return name
 
 
 def _domain_matches(domain: str, service_domain: str) -> bool:

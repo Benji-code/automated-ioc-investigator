@@ -47,7 +47,7 @@ threat (strong or weak) or neutral:
 | `campus_spread` | Many campus hosts, none independently flagged | Other hosts flagged for the same malware family (strong) |
 | `known_service` | Only the service's own client ports | Other ports on the service, e.g. a tunnel's public port (strong) |
 
-ThreatFox confidence is deliberately not a signal: it rates the indicator,
+The source's confidence (ThreatFox, MISP) is deliberately not a signal: it rates the indicator,
 not the host.
 
 The baseline verdict follows fixed rules (`signals.baseline_verdict`):

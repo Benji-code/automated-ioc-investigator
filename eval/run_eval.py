@@ -119,7 +119,8 @@ def recheck(saved: list[dict]) -> list[dict]:
             out.append(r)
             continue
         identity = {k: r[k] for k in ("indicator", "indicator_type", "affected_asset", "malware", "threat_type",
-                                      "threatfox_confidence", "evidence_first_seen", "evidence_last_seen",
+                                      "intel_source", "intel_feed", "intel_event_id", "intel_confidence", "intel_tags",
+                                      "intel_references", "threat_ref", "evidence_first_seen", "evidence_last_seen",
                                       "ioc_metadata", "match_ids", "n_events") if k in r}
         out.append(assess.finish_result(identity, r["evidence"], r["case_file"], r["model_reply_raw"],
                                         r.get("tool_calls") or [], r.get("charts") or []))
@@ -127,10 +128,11 @@ def recheck(saved: list[dict]) -> list[dict]:
 
 
 def from_output(path: Path, rechecked: bool) -> list[dict]:
-    saved = json.loads(path.read_text(encoding="utf-8"))
+    saved = assess.read_results(path)
     if rechecked:
         saved = recheck(saved)
-        path.write_text(json.dumps(saved, indent=2, default=str), encoding="utf-8")
+        out = {"usage": assess.usage_totals(saved), "results": saved}
+        path.write_text(json.dumps(out, indent=2, default=str), encoding="utf-8")
         (path.parent / "report.html").write_text(report.render(saved), encoding="utf-8")
         print(f"Re-applied code checks and rewrote {path} and {path.parent / 'report.html'}")
     results = []

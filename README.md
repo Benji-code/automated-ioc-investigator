@@ -3,8 +3,10 @@
 An LLM agent that investigates threat-intelligence alerts on a campus network
 and writes the incident report an analyst would.
 
-When a campus host contacts an address or domain listed on
-[ThreatFox](https://threatfox.abuse.ch), most matches turn out to be noise: a
+When a campus host contacts an address or domain on a threat-intelligence
+list (a local [MISP](https://www.misp-project.org) that combines public feeds,
+[ThreatFox](https://threatfox.abuse.ch) among them, or an analyst's own
+indicators), most matches turn out to be noise: a
 CDN address shared by thousands of sites, an ad pulled in by a web page, a
 tunnel client doing exactly what it was installed for. This project works
 through each match the way an analyst would. It pulls the host's flow records
@@ -25,15 +27,19 @@ Three design choices keep the reports trustworthy:
   infrastructure". Anything that fails is flagged for review, never quietly
   rewritten.
 
-The agent has no internet access, and with a local Ollama model no flow data
-leaves the network.
+The model has no internet access. Code looks up public context for each case
+in curated sources (Malpedia's description of the malware family, ThreatFox's
+listing of the indicator), sending only those public names, and the report
+cites them; `WEB_CONTEXT=0` turns this off. With a local Ollama model no flow
+data leaves the network (see [Cloud model provider](#cloud-model-provider) for the
+alternative).
 
 ## How it works
 
 ```mermaid
 %%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 40}}}%%
 flowchart LR
-    feed["IOC match feed<br/>ThreatFox indicator + campus host"] --> cases["One case per<br/>host and indicator"]
+    feed["IOC match feed<br/>flagged indicator + campus host"] --> cases["One case per<br/>host and indicator"]
     cases --> gather
 
     subgraph gather["Gather evidence (code)"]
@@ -95,7 +101,7 @@ for the final check.
 |---|---|---|---|
 | 1 | Group the feed into cases, one per host and indicator; merge duplicate visits and note domains shared across cases | Code | `evidence.py`, `correlation.py` |
 | 2 | Identify the flagged address: its owner and whether it's shared infrastructure | Code | `tools.identify_server_ips`, `tools.ip_asn` |
-| 3 | Set the expected behaviour: threat type, malware family and known services such as tunnels | Code | `tools.expected_behaviour`, `knowledge.py` |
+| 3 | Set the expected behaviour: threat type, malware family (or an analyst's threat briefing) and known services such as tunnels; look up the family and the indicator in Malpedia and ThreatFox | Code | `tools.expected_behaviour`, `knowledge.py`, `web_context.py` |
 | 4 | Analyse the contact: flows, the site names the host used, and whether it looks like a beacon, a held-open tunnel or a one-off | Code | `tools.indicator_flows`, `tools.indicator_names`, `beacon.py` |
 | 5 | Build a timeline of everything the host did in the minutes around each contact | Code | `timeline.py` |
 | 6 | Profile the host: what it's used for, its uptime, apps and DNS behaviour | Code | `tools.host_other_traffic`, `analysis.activity_profile`, `tools.host_dns_behaviour` |
@@ -104,7 +110,7 @@ for the final check.
 | 9 | Compute signals and a rule-based baseline verdict | Code | `signals.py` |
 | 10 | Investigate: read the evidence, run follow-up queries, pick charts, write the report and a verdict | Agent | `assess.py`, `tools.py`, `charts.py` |
 | 11 | Check the report against the evidence and the baseline; send problems back for one revision, then flag anything that still fails | Code | `assess.py` |
-| 12 | Write the HTML and Markdown reports | Code | `report.py` |
+| 12 | Write the HTML, Markdown and PDF reports | Code | `report.py`, `latex.py` |
 
 ## Architecture
 
@@ -118,10 +124,12 @@ flowchart TB
         rf["Random forest<br/>weakly supervised labels"] --> prof["Host type and<br/>its normal range"]
     end
 
-    subgraph feed["Threat feed (upstream)"]
+    subgraph feed["Threat feed"]
         direction TB
-        tf["ThreatFox<br/>indicators"] --> match["Matched against<br/>campus traffic"]
+        tf["MISP, ThreatFox API<br/>or manual indicators"] --> match["Matched against<br/>campus traffic"]
     end
+
+    pub["Public threat intel<br/>Malpedia, ThreatFox"]
 
     subgraph core["Investigation agent"]
         direction TB
@@ -136,7 +144,8 @@ flowchart TB
     llm -. "guarded read-only SQL" .-> db
     prof --> ev
     match --> ev
-    fc --> rep["HTML report<br/>verdict, charts, flow table"]
+    pub -. "public names only" .-> ev
+    fc --> rep["HTML and PDF report<br/>verdict, charts, flow table"]
     rep --> analyst(["Security analyst<br/>makes the final call"])
 
     classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
@@ -145,7 +154,7 @@ flowchart TB
     classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
     class rf,prof,kb,ev,fc,tf,match code
     class llm model
-    class db,rep data
+    class db,rep,pub data
     class analyst good
     style hc fill:none,stroke:#3b6fd4
     style feed fill:none,stroke:#3b6fd4
@@ -156,8 +165,9 @@ flowchart TB
   server, ...) with a random forest trained on weakly supervised labels, and
   measures what's normal for each type. See
   [host_classification/](host_classification/README.md).
-- **Threat feed** comes from upstream: ThreatFox indicators already matched
-  against campus traffic.
+- **Threat feed** (`build_feed.py`) pulls indicators from a local MISP, or
+  takes an analyst's indicators and threat description, and finds the campus
+  hosts that contacted them (`agent/matcher.py`).
 - **Investigation agent** (`assess.py`, `agent/`) gathers the evidence, runs
   the model and checks what it writes.
 
@@ -181,38 +191,159 @@ around the contact, each with a note on what it most likely was. That table
 is what separates, say, a flagged ad domain loaded in the same minute as a
 busy ad-funded site from a lone connection at 3 am.
 
+Each report comes as a page in `report.html`, a Markdown file and, with
+`--pdf`, a PDF whose one-page body is followed by an appendix of the figures,
+the flow table, the case facts and its sources. The threat background can
+draw on Malpedia's description of the malware family and the indicator's
+ThreatFox listing, both cited.
+
 ## Getting started
 
 You'll need Python 3.11+, read access to a SuperNetFlow ClickHouse database,
-and [Ollama](https://ollama.com) with a tool-calling model (or an OpenRouter
-key).
+[Ollama](https://ollama.com) with a tool-calling model (or an OpenRouter key),
+and for the threat feed a local MISP and an abuse.ch key. PDF reports need
+[tectonic](https://tectonic-typesetting.github.io) or a TeX distribution with
+`latexmk`; without one the reports are written as `.tex` files only.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # ClickHouse login, model and site settings
+pip install -r requirements-demo.txt   # optional: the stand dashboard
+cp .env.example .env                   # ClickHouse, MISP, abuse.ch, model and site settings
 ollama pull qwen3.5:9b
+brew install tectonic                  # optional: PDF reports
 ```
 
-Then point it at a feed of matches (JSON or JSON Lines):
+Every setting is listed in `.env.example` with a placeholder. The agent asks
+Ollama for a 32k-token context (`OLLAMA_NUM_CTX`): Ollama's 4k default
+silently cuts off the start of the prompt.
+
+### A full run
 
 ```bash
-python assess.py data/ioc_matches.jsonl                       # every case
-python assess.py data/ioc_matches.jsonl --indicator bore.pub  # one indicator
-python assess.py data/ioc_matches.jsonl --limit 5             # a batch, then --resume
-python assess.py data/sample/ioc_matches_sample.json          # fake sample feed
+python sync_threatfox.py --days 1                         # ThreatFox's latest IOCs into MISP
+python build_feed.py --source misp --days 7               # campus hosts that contacted them -> data/misp_matches.jsonl
+python assess.py data/misp_matches.jsonl --limit 5 --pdf  # investigate and write the reports
+python -m demo.anonymise output/assessments.json          # optional: the anonymised stand bundle
+streamlit run dashboard/app.py                            # optional: the dashboard, http://localhost:8501
 ```
 
 Results land in `output/`: `report.html` with every case (worst first,
-filterable), a Markdown report per case with its charts, and
-`assessments.json` with everything. They contain internal IPs and per-host
-activity, so they're gitignored.
+filterable), a Markdown report and a PDF per case in `output/cases/`, a batch
+`summary.pdf`, and `assessments.json` with everything, including token use.
+They contain internal IPs and per-host activity, so they're gitignored.
 
-A couple of things worth knowing:
+`assess.py` takes any feed of matches (JSON or JSON Lines):
 
-- The agent asks Ollama for a 32k-token context (`OLLAMA_NUM_CTX`). Ollama's
-  4k default silently cuts off the start of the prompt.
-- Every setting lives in `.env.example`, with placeholders.
+```bash
+python assess.py data/misp_matches.jsonl --indicator bore.pub  # one indicator
+python assess.py data/misp_matches.jsonl --limit 5 --resume    # the next five, keeping earlier results
+python assess.py data/sample/ioc_matches_sample.json           # fake sample feed
+```
+
+Without `--resume`, a run replaces `output/assessments.json`.
+
+### Building a feed from MISP
+
+Run a local MISP with [misp-docker](https://github.com/MISP/misp-docker),
+enable the public feeds you want (Feeds → "Load default feed metadata"), and
+create an auth key. Put `MISP_URL` and `MISP_KEY` in `.env`; the local
+instance's self-signed certificate is accepted unless `MISP_VERIFY_SSL=1`.
+
+ThreatFox's bulk exports fail and MISP's built-in ThreatFox feeds need a key,
+so ThreatFox comes in through its API instead, keeping its malware and
+threat-type labels (needs `ABUSECH_AUTH_KEY` and a MISP key with write access):
+
+```bash
+python sync_threatfox.py --days 1 --dry-run                               # count only, write nothing
+python build_feed.py --source misp --refresh                              # ask MISP to fetch its feeds first
+python build_feed.py --source misp --feeds "ThreatFox,Phishing feeds"     # only some feeds
+```
+
+`build_feed.py` takes the IP, IP:port, domain, hostname and URL attributes
+whose attribute timestamp is in the last N days (URLs are reduced to their
+host), skips values on MISP's warninglists, and searches campus traffic for
+them in windows of at most 5 days. Each match records its feed (the MISP
+event's title, or "ThreatFox"). Records keep the old feed format with an
+`intel` block in place of `threatfox` (see [docs/schema.md](docs/schema.md));
+older feeds still load.
+
+### Manual indicators and a threat description
+
+For a new threat that no feed lists yet, such as an email about a new CVE:
+
+```bash
+python build_feed.py --source manual --indicator 203.0.113.7 --indicator example.test \
+    --threat-file threat.txt --out data/manual_matches.jsonl
+python assess.py data/manual_matches.jsonl --pdf
+```
+
+One model call turns the description into a threat briefing (what an affected
+host's traffic looks like, what a false positive looks like, CVEs, references),
+saved in `data/threat_briefings/` and shown for you to confirm (`--yes` skips
+that). The investigation then uses it in place of the built-in knowledge base,
+labelled as an analyst-supplied description. `--push-misp` also saves the
+indicators as a MISP event (needs `MISP_WRITE_KEY`).
+
+### PDF reports
+
+`--pdf` writes each case as LaTeX (`output/cases/<case>.tex`, with its charts
+as vector PDFs) plus a batch overview (`output/summary.tex`), and compiles
+them with `latexmk` or `tectonic`, whichever is installed. The layout follows
+the hand-written CyberShield reports: a one-page body (the self-check asks the
+model to tighten a report over about 750 words), then an appendix with the
+figures, the flow table, the case facts and a closing line of sources and
+limits, all referred to by number from the body.
+
+To compile reports from a run made without a TeX engine, without running the
+model again:
+
+```bash
+python -m agent.latex output/assessments.json
+```
+
+### Dashboard and stand demo
+
+```bash
+streamlit run dashboard/app.py                     # real details, for the security team
+ANONYMISE=1 streamlit run dashboard/app.py         # anonymised
+DEMO_ONLY=1 streamlit run dashboard/app.py         # the event stand: anonymised, replay only
+```
+
+- **Threat board**: cases this week, likely threats against false positives,
+  the top threat types, and a table of recent cases (newest first, filtered by
+  verdict, threat type and source). Click a row for its report, charts and PDF,
+  shown inline or opened in its own tab. Beside it, the newest ThreatFox
+  malware families and MISP events, from a snapshot of public data.
+- **Feeds** (sidebar): ThreatFox, each MISP feed by name and the phishing
+  feeds as one group, each with its case count. The ticks filter the board;
+  in live mode they also choose which feeds a pull matches against (ThreatFox's
+  API is only called when ThreatFox is ticked).
+- **How it works**: the pipeline, replayed step by step for a recorded case.
+- **Try it**: indicators and a threat description in, a report out.
+
+The dashboard listens on localhost only. By default it reads
+`output/assessments.json` and its PDFs as they are. With `ANONYMISE=1`, and
+always with `DEMO_ONLY=1`, it shows the anonymised bundle instead, built by
+`python -m demo.anonymise output/assessments.json`: campus addresses become
+Host A, Host B, host names become role labels, visited sites become
+"streaming site 2" and the like, and public indicators stay. Building the
+bundle needs `CAMPUS_CIDR` and `CAMPUS_DOMAINS` in `.env`, and a TeX engine for
+its PDFs. Without a bundle, a fake sample set in `demo/sample/` is shown.
+
+Demo mode (the default) only replays recorded cases and makes no network
+calls, so it works on venue Wi-Fi or none. Live mode (a sidebar toggle, hidden
+by `DEMO_ONLY=1`) runs the pipeline and needs the database and the model.
+
+### Cloud model provider
+
+With `LLM_PROVIDER=openrouter`, case files (which hold internal IPs and per-host
+activity) are sent off-network to OpenRouter and the model's provider. The
+supervisor has approved this. Each case records its token use and cost, the run
+totals go into `assessments.json`, `MAX_RUN_COST_USD` stops a batch cleanly at a
+spending limit, and running out of credit stops the batch rather than failing
+each case. With an `anthropic/*` model the system prompt and case file are
+marked for prompt caching (`PROMPT_CACHE=0` turns it off).
 
 ## Evaluation
 
@@ -229,7 +360,14 @@ python eval/run_eval.py --from-output output/assessments.json  # re-score a save
 
 ```
 assess.py               runs each case: evidence, model, checks, report
+build_feed.py           builds a feed from MISP or manual indicators
+sync_threatfox.py       copies ThreatFox IOCs into MISP with their labels
 agent/
+  misp_feed.py          reads indicators from MISP as intel blocks
+  matcher.py            finds campus contacts and writes match records
+  briefing.py           threat description -> briefing (one model call)
+  web_context.py        public threat intel: Malpedia and ThreatFox lookups
+  latex.py              LaTeX/PDF reports
   tools.py, db.py       evidence queries and the model's guarded tools
   analysis.py           flow analysis: contact pattern, timelines, usage
   beacon.py, timeline.py
@@ -237,8 +375,11 @@ agent/
   casefile.py           the evidence as the model reads it
   knowledge.py          malware, service and site profiles
   llm_client.py         Ollama / OpenRouter client with a tool loop
-  charts.py, report.py  SVG charts and the HTML and Markdown reports
+  charts.py, report.py  charts (SVG and PDF) and the HTML and Markdown reports
+  mdrender.py           the model's Markdown, safely rendered as HTML
 host_classification/    host-type classifier and per-type profiles
+dashboard/              Streamlit dashboard (threat board, pipeline replay, try it)
+demo/                   anonymiser, intel snapshot and a fake sample bundle
 eval/                   verdict evaluation
 docs/                   design notes and the data schema
 ```
@@ -249,8 +390,8 @@ docs/                   design notes and the data schema
   unknown.
 - Per-minute data is kept for about 15 days; older cases rely on large flows
   and the feed's own rows.
-- Malware and service context comes from a local knowledge base, not live
-  research.
+- Threat context comes from a local knowledge base and two curated public
+  sources (Malpedia, ThreatFox); there is no open web search.
 - Thresholds for "rare", "popular" and "exfiltration-sized" are judgement
   calls.
 - A report is a first assessment for an analyst to confirm, not a final
@@ -261,10 +402,10 @@ For the full list of signals, checks and tools, see
 
 ## Future improvements
 
-The agent only investigates what the feed hands it, and right now that's
-ThreatFox alone. That has two consequences:
+The agent only investigates what the feed hands it. That has two
+consequences:
 
-- **It only knows what's already been reported.** ThreatFox is
+- **It only knows what's already been reported.** Public feeds are
   community-driven, so coverage leans towards some malware families, new
   infrastructure appears only after someone spots and submits it, and many
   entries are shared addresses (CDNs, cloud hosting) that match plenty of
@@ -275,9 +416,10 @@ ThreatFox alone. That has two consequences:
 
 Two natural next steps:
 
-- **More threat feeds.** Indicators from other sources, such as abuse.ch's
-  URLhaus and Feodo Tracker, Spamhaus or a MISP instance, normalised into the
-  same case format, so the investigation could stay largely as it is.
+- **Web context for threat briefings.** Let the briefing step search the web
+  for a threat's public name, CVE or indicator (a few searches, never campus
+  addresses) and cite what it found, beyond the curated Malpedia and ThreatFox
+  lookups.
 - **An anomaly detection flow.** Much of the groundwork exists: per-type
   profiles of normal host behaviour and a per-minute beacon detector. Running
   those across all campus hosts, rather than only flagged ones, would raise

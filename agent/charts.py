@@ -986,3 +986,183 @@ def describe(chart: dict) -> str:
     # The marker comes last: a line that starts with it was pasted whole into reports.
     return (f"{chart['id']}: {chart['title']} ({chart['kind']}):{when} {'; '.join(parts)}.{marked} "
             f"Place as [[chart {chart['id']}]].")
+
+
+# --- PDF (matplotlib) for the LaTeX report -------------------------------------------------
+
+PDF_COLORS = ("#2a78d6", "#eb6834", "#1baf7a")  # the SVG palette's light-mode series
+PDF_DIM = "#c4c2ba"
+PDF_MARK = "#6f6d68"
+PDF_WIDTH_IN = 7.0  # the LaTeX text width (17.8 cm), so chart text prints at its real size
+PDF_LABEL_CHARS = 38
+
+
+def pdf_label(text) -> str:
+    """Text for a matplotlib label: no raw <, > or ~ (they read badly next to
+    LaTeX's own text) and no $ (matplotlib would start maths)."""
+    text = re.sub(r"<([^<>\s]+)>", r"(\1)", str(text))  # <name> -> (name)
+    for raw, plain in (("<=", "at most "), (">=", "at least "), ("<", "under "), (">", "over "), ("~", "about "),
+                       ("$", r"\$")):
+        text = text.replace(raw, plain)
+    return " ".join(text.split())
+
+
+def _pdf_style():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({
+        "font.family": "serif", "font.serif": ["CMU Serif", "Computer Modern Roman", "Latin Modern Roman",
+                                               "DejaVu Serif"],
+        "mathtext.fontset": "cm", "axes.unicode_minus": False, "font.size": 8.5, "axes.titlesize": 9,
+        "axes.spines.top": False, "axes.spines.right": False, "axes.edgecolor": "#c3c2b7",
+        "axes.grid": True, "grid.color": "#e6e5df", "grid.linewidth": 0.6, "pdf.fonttype": 42,
+    })
+    return plt
+
+
+PDF_STEM_MAX_POINTS = 12  # a few scattered contacts: stems at each one, not a line joining them
+PDF_BAND_MAX_SHARE = 0.4  # a contact span wider than this share of the axis is marked by its ends
+
+
+def _pdf_axis_format(ax, unit: str, axis: str = "y") -> None:
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+    target = ax.yaxis if axis == "y" else ax.xaxis
+    target.set_major_formatter(FuncFormatter(lambda value, _: pdf_label(fmt_tick(value, unit))))
+    target.set_major_locator(MaxNLocator(nbins=5 if axis == "x" else 6, min_n_ticks=3))
+
+
+def _pdf_markers(ax, chart: dict) -> None:
+    """The flagged contact: a band for a short span, a line for a moment, and
+    dashed lines at the first and last contact when the span fills the chart."""
+    import matplotlib.dates as mdates
+
+    lo, hi = ax.get_xlim()
+    for marker in chart.get("markers") or []:
+        start = _parse_time(marker["start"])
+        end = _parse_time(marker.get("end") or marker["start"])
+        label = pdf_label(marker.get("label", ""))
+        width = mdates.date2num(end) - mdates.date2num(start)
+        if width <= 0 or (end - start).total_seconds() < 60:
+            ax.axvline(start, color=PDF_MARK, lw=1, ls="--", label=label)
+        elif hi > lo and width / (hi - lo) > PDF_BAND_MAX_SHARE:
+            ax.axvline(start, color=PDF_MARK, lw=1, ls="--", label=f"{label}: first and last")
+            ax.axvline(end, color=PDF_MARK, lw=1, ls="--")
+        else:
+            ax.axvspan(start, end, color=PDF_MARK, alpha=0.12, lw=0, label=label)
+        ax.set_xlim(lo, hi)
+
+
+def _pdf_time_axis(ax, chart: dict) -> None:
+    import matplotlib.dates as mdates
+    from datetime import timedelta
+
+    times = [_parse_time(x) for s in chart["series"] for x, _ in s["points"]]
+    if times and max(times) - min(times) < timedelta(minutes=10):  # a minute or two: give the axis room
+        middle = min(times) + (max(times) - min(times)) / 2
+        ax.set_xlim(middle - timedelta(minutes=5), middle + timedelta(minutes=5))
+    elif times:
+        pad = (max(times) - min(times)) * 0.03
+        ax.set_xlim(min(times) - pad, max(times) + pad)
+    locator = mdates.AutoDateLocator(minticks=3, maxticks=7)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.set_xlabel("UTC")
+
+
+def _pdf_line(ax, chart: dict) -> None:
+    """Lines that drop to zero across quiet gaps (as in the SVG); a handful of
+    scattered points as stems, so no line suggests traffic between them."""
+    is_time = chart["x_type"] == "time"
+    sparse = max((len(s["points"]) for s in chart["series"]), default=0) <= PDF_STEM_MAX_POINTS
+    for i, s in enumerate(chart["series"]):
+        colour, name = PDF_COLORS[i % 3], pdf_label(s["name"])
+        points = [((_parse_time(x).timestamp() if is_time else float(x)), y) for x, y in s["points"]]
+        if not sparse:
+            points = _fill_gaps(points, chart["unit"])
+        xs = [datetime.fromtimestamp(x, tz=timezone.utc) if is_time else x for x, _ in points]
+        ys = [y for _, y in points]
+        if sparse:
+            ax.vlines(xs, 0, ys, color=colour, lw=1.4, alpha=0.8)
+            ax.plot(xs, ys, "o", color=colour, ms=4, label=name)
+        else:
+            ax.plot(xs, ys, color=colour, lw=1.4, label=name)
+    if is_time:
+        _pdf_time_axis(ax, chart)
+        _pdf_markers(ax, chart)
+    if chart.get("log_scale"):
+        ax.set_yscale("log")
+    elif chart["unit"] in ("bytes", "count", "seconds"):
+        ax.set_ylim(bottom=0)
+    _pdf_axis_format(ax, chart["unit"])
+
+
+def _pdf_hbar(ax, chart: dict) -> None:
+    """Category bars, top to bottom in the chart's order; the highlighted
+    bars (the case's host or site) in colour, the rest grey, if one series."""
+    categories = list(dict.fromkeys(x for s in chart["series"] for x, _ in s["points"]))
+    n = len(chart["series"])
+    height = 0.8 / max(n, 1)
+    highlight = set(chart.get("highlight") or [])
+    for i, s in enumerate(chart["series"]):
+        values = dict((x, y) for x, y in s["points"])
+        positions = [k + (i - (n - 1) / 2) * height for k in range(len(categories))]
+        colors = [PDF_COLORS[i % 3]] * len(categories)
+        if n == 1 and highlight:
+            colors = [PDF_COLORS[0] if c in highlight else PDF_DIM for c in categories]
+        ax.barh(positions, [values.get(c, 0) for c in categories], height=height * 0.9, color=colors,
+                label=pdf_label(s["name"]))
+    ax.set_yticks(range(len(categories)))
+    ax.set_yticklabels(["\n".join(wrap_label(pdf_label(c), PDF_LABEL_CHARS)) for c in categories])
+    ax.invert_yaxis()
+    ax.grid(axis="y", visible=False)
+    _pdf_axis_format(ax, chart["unit"], axis="x")
+
+
+def _pdf_columns(ax, chart: dict) -> None:
+    """Vertical bars over time or a number, series side by side."""
+    import matplotlib.dates as mdates
+
+    is_time = chart["x_type"] == "time"
+    n = len(chart["series"])
+    xs_all = sorted({_parse_time(x).timestamp() if is_time else float(x) for s in chart["series"] for x, _ in s["points"]})
+    gaps = [b - a for a, b in zip(xs_all, xs_all[1:])]
+    step = min(gaps) if gaps else (3600.0 if is_time else 1.0)
+    if is_time:
+        step /= 86400  # matplotlib dates count in days
+    width = 0.8 * step / max(n, 1)
+    for i, s in enumerate(chart["series"]):
+        xs = [mdates.date2num(_parse_time(x)) if is_time else float(x) for x, _ in s["points"]]
+        offset = (i - (n - 1) / 2) * width
+        ax.bar([x + offset for x in xs], [y for _, y in s["points"]], width=width, color=PDF_COLORS[i % 3],
+               label=pdf_label(s["name"]))
+    if is_time:
+        ax.xaxis_date()
+        _pdf_markers(ax, chart)
+    _pdf_axis_format(ax, chart["unit"])
+
+
+def chart_pdf(chart: dict, path) -> None:
+    """Draw the same chart dict as render_svg() as a vector PDF, for the
+    LaTeX report: serif text, the flagged contact marked, no raw <, >, ~."""
+    plt = _pdf_style()
+    categories = len({x for s in chart["series"] for x, _ in s["points"]})
+    horizontal = chart["kind"] == "bar" and chart["x_type"] == "category"
+    height = max(1.6, 0.28 * categories + 0.8) if horizontal else 2.6
+    fig, ax = plt.subplots(figsize=(PDF_WIDTH_IN, height))
+    try:
+        if chart["kind"] == "line":
+            _pdf_line(ax, chart)
+        elif horizontal:
+            _pdf_hbar(ax, chart)
+        else:
+            _pdf_columns(ax, chart)
+        handles, _ = ax.get_legend_handles_labels()
+        if len(handles) > 1 or chart.get("markers"):
+            ax.legend(frameon=False, fontsize=7.5, loc="best")
+        fig.tight_layout()
+        fig.savefig(path, format="pdf")
+    finally:
+        plt.close(fig)

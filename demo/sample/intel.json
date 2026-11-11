@@ -1,0 +1,54 @@
+{
+ "taken_at": "2026-09-15 00:00 UTC",
+ "sample": true,
+ "errors": [],
+ "threatfox": [
+  {
+   "family": "ClearFake",
+   "malware": "js.clearfake",
+   "iocs": 14,
+   "threat_types": [
+    "payload_delivery"
+   ],
+   "last_seen": "2026-09-14 23:10:00"
+  },
+  {
+   "family": "NanoCore RAT",
+   "malware": "win.nanocore",
+   "iocs": 9,
+   "threat_types": [
+    "botnet_cc"
+   ],
+   "last_seen": "2026-09-14 21:02:00"
+  },
+  {
+   "family": "ClickFix",
+   "malware": "js.iclickfix",
+   "iocs": 5,
+   "threat_types": [
+    "payload_delivery"
+   ],
+   "last_seen": "2026-09-14 18:45:00"
+  }
+ ],
+ "misp_events": [
+  {
+   "date": "2026-09-14",
+   "info": "Sample phishing URL feed",
+   "attributes": 3127,
+   "org": "Sample feed"
+  },
+  {
+   "date": "2026-09-14",
+   "info": "ThreatFox IOCs 2026-09-14",
+   "attributes": 413,
+   "org": "Sample org"
+  },
+  {
+   "date": "2026-09-13",
+   "info": "Example C2 blocklist feed",
+   "attributes": 88,
+   "org": "Sample feed"
+  }
+ ]
+}

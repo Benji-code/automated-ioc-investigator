@@ -162,11 +162,14 @@ def identify_server_ips(identity: dict, case_rows: list[dict], window: CaseWindo
     under that name in live DNS/SNI data."""
     indicator = identity["indicator"]
     parsed = evidence.parse_ip_port(indicator)
+    if not parsed and evidence.is_ip(indicator):
+        parsed = (indicator, None)
     if parsed:
         ip, port = parsed
         return {
             "indicator_port": port,
-            "ips": [{"server_ip": ip, "found_via": ["indicator is ip:port"], "names": [], "asn_org": []}],
+            "ips": [{"server_ip": ip, "found_via": ["indicator is ip:port" if port else "indicator is an IP address"],
+                     "names": [], "asn_org": []}],
         }
 
     found: dict[str, dict] = {}
@@ -220,7 +223,7 @@ def expected_behaviour(identity: dict, server_ips: dict, flows_result: dict) -> 
     """Threat type and malware profiles, plus the known-service profile for
     the flagged domain or the ports seen, and whether each observed port is
     one the service's own client normally uses."""
-    profile = knowledge.get_profile(identity.get("malware"), identity.get("threat_type"))
+    profile = knowledge.get_profile(identity.get("malware"), identity.get("threat_type"), identity.get("threat_ref"))
     ports = _observed_ports(flows_result)
 
     service = None

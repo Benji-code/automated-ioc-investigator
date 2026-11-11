@@ -223,6 +223,75 @@ SCHEMA_CARD = ("Tables (6=TCP, 17=UDP; up = host to server; IPs are plain IPv4 t
                + "\n".join(_card_entry(t) for t in RUN_SQL_TABLES.values()) + "\n")
 
 
+FEED_RECORDS_MD = """## Match records (the IOC feed)
+
+`build_feed.py` writes, and `assess.py` reads, one JSON object per line: one
+record per (indicator, campus host, minute) with the matched rows.
+
+```json
+{
+  "indicator_type": "ip | ip:port | domain",
+  "indicator": "203.0.113.7:443",
+  "affected_asset": "192.0.2.10",
+  "intel": {
+    "source": "misp | threatfox | manual",
+    "feed": "feed or event name",
+    "event_id": "MISP event id or null",
+    "threat_type": "botnet_cc | payload_delivery | exploit | phishing | ... | unknown",
+    "malware": "family (a malpedia key such as win.nanocore where known) or null",
+    "confidence": "0-100 or null (MISP often has none)",
+    "tags": ["tlp:white", "misp-galaxy:malpedia=\\"NanoCore\\""],
+    "first_seen_utc": "the matched flow's first minute, not the source's date",
+    "last_seen_utc": "the matched flow's last minute",
+    "source_first_seen": "the source's own first-seen date, if any",
+    "source_last_seen": "the source's own last-seen date, if any",
+    "references": ["https://..."],
+    "threat_ref": "slug of a threat briefing in data/threat_briefings/, or null"
+  },
+  "evidence": {"subscriber_activity": [], "long_flow_summary": [], "dns_tuple": []},
+  "match_id": "m_<16 hex>",
+  "created_at": "2026-11-10T00:00:00Z"
+}
+```
+
+- The host field is `affected_asset` unless `FEED_ASSET_FIELD` names another.
+- Older feeds carry a `threatfox` block (confidence, first/last seen, malware,
+  threat type) instead of `intel`; it is read as `intel` with source `threatfox`.
+- `subscriber_activity` rows have the columns of `canopus.subscriber_activity_1m`
+  listed in `agent/matcher.py`; `long_flow_summary` rows those of
+  `public.long_flow_summary`. `dns_tuple` holds no names, so it stays empty.
+- MISP fields: `threat_type` from `threatfox:threat-type`, kill-chain or
+  threat-type tags, else the event title; `malware` from `threatfox:malware` or
+  the malpedia galaxy; `confidence` from `threatfox:confidence`,
+  `misp:confidence-level` or `estimative-language` tags; `references` from the
+  event's link attributes.
+
+## Threat briefings
+
+`data/threat_briefings/<slug>.json` (gitignored), from an analyst's threat
+description (`build_feed.py --source manual --threat-file ...`). The CVEs,
+indicators and URLs are kept only if they appear in the description itself.
+
+```json
+{
+  "slug": "examplevpn-cve-2026-12345-exploitation-1a2b3c",
+  "name": "short name of the threat",
+  "summary": "two or three sentences",
+  "cves": ["CVE-2026-12345"],
+  "indicators_mentioned": ["bad.example"],
+  "references": ["https://..."],
+  "victim_traffic": "what an affected host's traffic to the indicator looks like",
+  "expected_traffic_shape": "what an affected host sends and receives, ports and protocols",
+  "expected_recurrence": "once, a burst, or repeated contact",
+  "false_positive_pattern": "what harmless traffic to the indicator looks like",
+  "description": "the analyst's original text",
+  "created_at": "2026-11-10T00:00:00Z",
+  "source": "analyst-supplied threat description"
+}
+```
+"""
+
+
 def markdown() -> str:
     """Full human-readable schema notes (docs/schema.md)."""
     out = ["# SuperNetFlow tables used by the IOC triage agent", "",
@@ -240,4 +309,5 @@ def markdown() -> str:
         if t.differs_from_docs:
             out += ["", "**Differs from the public docs:**", ""] + [f"- {d}" for d in t.differs_from_docs]
         out.append("")
+    out.append(FEED_RECORDS_MD)
     return "\n".join(out)

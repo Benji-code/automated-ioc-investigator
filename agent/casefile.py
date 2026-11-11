@@ -5,7 +5,7 @@ so the model (and a reviewer reading the saved case file) can trace it.
 """
 from __future__ import annotations
 
-from . import charts, config, schema
+from . import charts, config, evidence, schema
 from .analysis import fmt_bytes, fmt_duration
 
 LFS = "long_flow_summary"
@@ -53,26 +53,47 @@ def _host_line(host: dict | None) -> str:
             "or they scan every row in the window)")
 
 
-def _ioc_section(identity: dict, host: dict | None = None) -> str:
+def _intel_lines(identity: dict) -> list[str]:
+    """The source's confidence, event, tags and references."""
+    confidence = evidence.confidence_text(identity)
+    if identity.get("intel_confidence") is None:
+        confidence += " (MISP events often carry none; it would rate the indicator, not this host, anyway)"
+    lines = [f"Source confidence: {confidence}"]
+    if identity.get("intel_event_id"):
+        lines.append(f"Source event ID: {identity['intel_event_id']}")
+    if identity.get("intel_source_first_seen") or identity.get("intel_source_last_seen"):
+        lines.append(f"Source's own first/last seen for the indicator: {identity.get('intel_source_first_seen') or '?'}"
+                     f" / {identity.get('intel_source_last_seen') or '?'}")
+    tags = identity.get("intel_tags") or []
+    if tags:
+        lines.append(f"Source tags: {', '.join(str(t) for t in tags[:15])}")
+    refs = identity.get("intel_references") or []
+    if refs:
+        lines.append(f"Source references: {', '.join(str(r) for r in refs[:5])}")
     metadata = identity.get("ioc_metadata")
     if metadata:
-        intel = "\n".join(f"  {k}: {v}" for k, v in metadata.items())
-        intel = "ThreatFox entry details (entered by hand in data/ioc_metadata.json):\n" + intel
+        lines.append("Source entry details (entered by hand in data/ioc_metadata.json):")
+        lines += [f"  {k}: {v}" for k, v in metadata.items()]
     else:
-        intel = ("ThreatFox entry dates, reporter and ID: not available (the feed does not carry them; "
-                 "they can be added by hand in data/ioc_metadata.json).")
+        lines.append("Source entry dates, reporter and ID: not available (the feed does not carry them; "
+                     "they can be added by hand in data/ioc_metadata.json).")
+    return lines
+
+
+def _ioc_section(identity: dict, host: dict | None = None) -> str:
+    intel = "\n".join(_intel_lines(identity))
     return f"""[STEP 1] IOC MATCH
 Indicator: {identity['indicator']} (type={identity['indicator_type']})
 Affected {config.HOST_LABEL}: {identity['affected_asset']}
 {_host_line(host)}
 Feed match records for this pair: {identity['n_events']} (one per matching per-minute row, not separate incidents)
 Evidence first/last seen (UTC): {identity['evidence_first_seen']} / {identity['evidence_last_seen']}{_local_pair(identity['evidence_first_seen'], identity['evidence_last_seen'])}
-  (these are the matched flow's own times, NOT ThreatFox's dates for the indicator)
+  (these are the matched flow's own times, NOT the source's dates for the indicator)
 
-[STEP 2] IOC CONTEXT (ThreatFox, via the feed)
+[STEP 2] IOC CONTEXT (the indicator's source, via the feed)
+Indicator source: {evidence.source_name(identity)}
 Malware family: {identity['malware']}
 Threat type: {identity['threat_type']}
-ThreatFox confidence: {identity['threatfox_confidence']}/100
 {intel}"""
 
 
@@ -162,6 +183,17 @@ def _service_block(service: dict | None, port_fit: list[dict], port_verdict: str
 def _expected_section(identity: dict, expected: dict) -> str:
     malware = expected.get("malware_profile", {})
     threat = expected.get("threat_type_profile", {})
+    if expected.get("briefing"):
+        refs = ", ".join(expected["briefing"].get("references") or []) or "none given"
+        return f"""[STEP 4] EXPECTED BEHAVIOUR (analyst-supplied threat description, not the local knowledge base)
+Threat: {malware.get('family')}
+  {malware.get('notes')}
+  What an affected host's traffic looks like: {threat.get('victim_traffic')}
+  Expected traffic shape: {threat.get('expected_traffic_shape')}
+  Expected recurrence: {threat.get('expected_recurrence')}
+  Common false-positive pattern: {threat.get('false_positive_pattern')}
+  References in the description: {refs}
+{_service_block(expected.get('service'), expected.get('service_port_fit', []), expected.get('service_port_verdict'))}"""
     return f"""[STEP 4] EXPECTED BEHAVIOUR (local knowledge base)
 Malware family: {malware.get('family')}
   {malware.get('notes')}
@@ -734,12 +766,38 @@ def _charts_section(options: list[dict]) -> str:
             f"descriptions into the report):\n{lines}\n\n")
 
 
+def _public_intel_section(found: dict | None) -> str:
+    header = ("[STEP 4b] PUBLIC THREAT INTEL (looked up online for this case: about the threat in general, "
+              "not evidence about this host)")
+    found = found or {}
+    if not found.get("enabled", True):
+        return f"{header}\n  Not looked up (WEB_CONTEXT=0)."
+    lines = [header]
+    family = found.get("malpedia")
+    if family:
+        aliases = f" (also known as {', '.join(family['aliases'])})" if family.get("aliases") else ""
+        lines.append(f"  Malpedia, {family['name']}{aliases}: \"{family['description']}\" ({family['url']})")
+    else:
+        lines.append("  Malpedia: no entry for this malware family (or no family given).")
+    for listing in found.get("threatfox") or []:
+        lines.append(f"  ThreatFox lists {listing.get('ioc')} as {listing.get('malware_printable') or listing.get('malware')}"
+                     f", {listing.get('threat_type')}, confidence {listing.get('confidence_level')}, first seen "
+                     f"{listing.get('first_seen')}, last seen {listing.get('last_seen') or 'not given'}, reported by "
+                     f"{listing.get('reporter') or 'unknown'}" + (f"; reference {listing['reference']}"
+                                                                 if listing.get("reference") else ""))
+    if not found.get("threatfox") and "ThreatFox" not in " ".join(found.get("errors") or []):
+        lines.append("  ThreatFox: no listing of this exact indicator.")
+    lines += [f"  (lookup failed: {error})" for error in found.get("errors") or []]
+    return "\n".join(lines)
+
+
 DATA_LIMITATIONS = [
     "Flow data only: no payloads, so the content of any session is unknown.",
     "long_flow_summary only holds flows over a size/duration threshold; short flows are missing.",
     "subscriber_activity_1m keeps about 15 days; older per-minute detail is gone.",
     "Visitors reaching the host through a tunnel appear as the tunnel server's IP, so they are hidden.",
-    "No internet research: service and malware context comes from the local knowledge base only.",
+    "Threat context comes from a local knowledge base and the public sources cited (Malpedia, ThreatFox); "
+    "nothing else was looked up online.",
 ]
 
 
@@ -753,7 +811,7 @@ def build_case_file(ev: dict, blind: bool = False) -> str:
     conclusions = "" if blind else _signals_section(ev) + "\n\n"
     return f"""CASE FILE
 The evidence below was gathered automatically just now (steps 1-5, 7 and 8 of the workflow).
-ThreatFox confidence rates the indicator, not this host.
+The source's confidence rates the indicator, not this host.
 
 {_ioc_section(ev['identity'], ev.get('host'))}
 
@@ -762,6 +820,8 @@ ThreatFox confidence rates the indicator, not this host.
 {_ips_section(ev['server_ips'], ev['flows'], ev.get('asn'))}
 
 {_expected_section(ev['identity'], ev['expected'])}
+
+{_public_intel_section(ev.get('web_context'))}
 
 {_features_section(ev.get('domain_features', []))}
 

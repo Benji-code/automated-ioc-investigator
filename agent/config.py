@@ -77,6 +77,24 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 # case starts failing with the same upstream error.
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
 
+def _float_env(name: str, default: float | None) -> float | None:
+    value = os.getenv(name, "").strip()
+    return float(value) if value else default
+
+
+# Cost guard. Prices are USD per million tokens, for estimating spend when the
+# provider does not report the cost itself (OpenRouter does, with usage
+# accounting). 0 for a local model. Take them from the model's page on
+# openrouter.ai. MAX_RUN_COST_USD (unset = no limit) stops a batch cleanly once
+# the run's spend reaches it.
+PRICE_INPUT_PER_MTOK = _float_env("LLM_PRICE_INPUT_PER_MTOK", 0.0)
+PRICE_OUTPUT_PER_MTOK = _float_env("LLM_PRICE_OUTPUT_PER_MTOK", 0.0)
+MAX_RUN_COST_USD = _float_env("MAX_RUN_COST_USD", None)
+# Anthropic prompt caching through OpenRouter (anthropic/* models only): the
+# system prompt and case file are marked cacheable, as they repeat in every
+# tool round of a case. PROMPT_CACHE=0 turns it off.
+PROMPT_CACHE = os.getenv("PROMPT_CACHE", "1").strip().lower() not in ("0", "false", "no", "off")
+
 TEMPERATURE = 0.0  # identical evidence should give an identical answer
 SEED = 0           # Ollama: fixed sampling seed, for the same reason
 # Tool rounds per case (follow-up queries and charts) before a final text
@@ -187,13 +205,57 @@ FEED_ASSET_FIELD = os.getenv("FEED_ASSET_FIELD", "affected_asset").strip()
 REVERSE_DNS = os.getenv("REVERSE_DNS", "1").strip() not in ("0", "false", "no")
 REVERSE_DNS_TIMEOUT_SEC = 3.0
 
-# Optional, gitignored: real ThreatFox fields pasted in by hand per IOC.
+# Optional, gitignored: fields from the indicator's source (MISP, ThreatFox) pasted in by hand per IOC.
 IOC_METADATA_PATH = PROJECT_ROOT / "data" / "ioc_metadata.json"
+
+# --- Threat feeds: MISP (agent/misp_feed.py, build_feed.py) -----------------
+# A local MISP (e.g. the misp-docker setup) that combines several public feeds.
+MISP_URL = os.getenv("MISP_URL", "https://localhost").strip().rstrip("/")
+MISP_KEY = os.getenv("MISP_KEY", "").strip()              # read-only auth key
+MISP_WRITE_KEY = os.getenv("MISP_WRITE_KEY", "").strip()  # only for build_feed.py --push-misp
+# The local instance uses a self-signed certificate, so checking is off by default.
+MISP_VERIFY_SSL = os.getenv("MISP_VERIFY_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
+MISP_LOOKBACK_DAYS = _int_env("MISP_LOOKBACK_DAYS", 7)
+MISP_TIMEOUT_SEC = _int_env("MISP_TIMEOUT_SEC", 120)
+# Public threat intel looked up online for each case (agent/web_context.py):
+# Malpedia's description of the malware family and ThreatFox's listing of the
+# indicator. Only public names are sent. WEB_CONTEXT=0 turns it off.
+WEB_CONTEXT = os.getenv("WEB_CONTEXT", "1").strip().lower() not in ("0", "false", "no", "off")
+# ThreatFox API (sync_threatfox.py copies its IOCs into MISP with their labels).
+ABUSECH_AUTH_KEY = os.getenv("ABUSECH_AUTH_KEY", "").strip()
+THREATFOX_API_URL = "https://threatfox-api.abuse.ch/api/v1/"
+# Matching indicators against campus traffic (agent/matcher.py) scans
+# subscriber_activity_1m campus-wide, so each query covers at most this many
+# days (never more than 5: the 200M-row read limit).
+MATCH_CHUNK_DAYS = min(max(_int_env("MATCH_CHUNK_DAYS", 1), 1), 5)
+# Analyst-supplied threat descriptions turned into briefings (agent/briefing.py).
+THREAT_BRIEFINGS_DIR = PROJECT_ROOT / "data" / "threat_briefings"
+
+
+def misp_settings(write: bool = False) -> dict:
+    """URL, key and TLS setting for PyMISP. Exits with a clear message if the key is missing."""
+    name = "MISP_WRITE_KEY" if write else "MISP_KEY"
+    key = MISP_WRITE_KEY if write else MISP_KEY
+    if not key:
+        raise SystemExit(f"{name} is not set. Add it to .env (see .env.example).")
+    return {"url": MISP_URL, "key": key, "ssl": MISP_VERIFY_SSL, "timeout": MISP_TIMEOUT_SEC}
+
 
 # --- Host classification (host_classification/) -------------------------------
 # The campus address range, for selecting campus hosts to profile (e.g.
 # 192.0.2.0/24). Site-specific, so it lives in .env.
 CAMPUS_CIDR = os.getenv("CAMPUS_CIDR", "").strip()
+# Stand demo (dashboard/app.py): DEMO_ONLY=1 hides Live mode and the Try it
+# tab, so the dashboard can only replay recorded, anonymised cases.
+DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+# The dashboard shows real hosts, names and sites by default (the security
+# team's own use). ANONYMISE=1 passes everything through demo/anonymise.py
+# first; DEMO_ONLY=1 (the stand) always does, whatever ANONYMISE says.
+ANONYMISE = os.getenv("ANONYMISE", "0").strip().lower() in ("1", "true", "yes", "on")
+# The organisation's own DNS domains, comma-separated (e.g. example.edu). The
+# stand demo's anonymiser replaces any name under them, and its test fails if
+# one is left. Site-specific, so it lives in .env.
+CAMPUS_DOMAINS = [d.strip().lower().strip(".") for d in os.getenv("CAMPUS_DOMAINS", "").split(",") if d.strip()]
 # Everything derived from real hosts stays in data/ (gitignored): seed labels,
 # features, the trained model and the per-type profiles.
 HOST_CLASSIFICATION_DIR = PROJECT_ROOT / "data" / "host_classification"

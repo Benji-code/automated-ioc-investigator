@@ -38,6 +38,75 @@ class DailyQuotaExceeded(RuntimeError):
     Never raised when config.PROVIDER == "ollama"."""
 
 
+class OutOfCredit(DailyQuotaExceeded):
+    """OpenRouter has no credit left (HTTP 402) or the key's spending limit
+    is reached. Like the daily quota, it stops the whole batch."""
+
+
+# Token use since the last reset_usage() (assess.py resets it per case).
+# Ollama reports prompt_eval_count / eval_count; OpenRouter a `usage` block,
+# with the actual cost when usage accounting is on.
+usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0}
+
+
+def reset_usage() -> None:
+    for key in usage:
+        usage[key] = 0.0 if key == "cost_usd" else 0
+
+
+def usage_snapshot() -> dict:
+    return {**usage, "cost_usd": round(usage["cost_usd"], 6)}
+
+
+def estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
+    """USD from the per-million-token prices in config (0 for a local model)."""
+    return (prompt_tokens * config.PRICE_INPUT_PER_MTOK + completion_tokens * config.PRICE_OUTPUT_PER_MTOK) / 1e6
+
+
+def _add_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0, cost: float | None = None) -> None:
+    usage["calls"] += 1
+    usage["prompt_tokens"] += int(prompt_tokens or 0)
+    usage["completion_tokens"] += int(completion_tokens or 0)
+    usage["cached_tokens"] += int(cached_tokens or 0)
+    usage["cost_usd"] += float(cost) if cost is not None else estimate_cost(prompt_tokens or 0, completion_tokens or 0)
+
+
+def _record_openrouter_usage(data: dict) -> None:
+    block = data.get("usage") or {}
+    details = block.get("prompt_tokens_details") or {}
+    _add_usage(block.get("prompt_tokens") or 0, block.get("completion_tokens") or 0,
+               details.get("cached_tokens") or 0, block.get("cost"))
+
+
+CREDIT_WORDS = ("credit", "insufficient", "limit exceeded", "key limit", "spend limit")
+
+
+def _out_of_credit(response) -> bool:
+    """HTTP 402, or 403 saying the key's limit is reached."""
+    if response.status_code == 402:
+        return True
+    return response.status_code == 403 and any(w in response.text.lower() for w in CREDIT_WORDS)
+
+
+def _cached(messages: list[dict]) -> list[dict]:
+    """Anthropic prompt caching through OpenRouter: mark the system prompt and
+    the case file (the first user message), which stay the same across one
+    case's tool rounds, with cache_control."""
+    out, marked_user = [], False
+    for message in messages:
+        mark = message.get("role") == "system" or (message.get("role") == "user" and not marked_user)
+        if mark and isinstance(message.get("content"), str):
+            marked_user = marked_user or message["role"] == "user"
+            message = {**message, "content": [{"type": "text", "text": message["content"],
+                                               "cache_control": {"type": "ephemeral"}}]}
+        out.append(message)
+    return out
+
+
+def _use_cache(model: str) -> bool:
+    return config.PROMPT_CACHE and model.startswith("anthropic/")
+
+
 def _to_ollama_messages(messages: list[dict]) -> list[dict]:
     """Ollama's native API wants tool-call arguments as objects, not JSON strings."""
     converted = []
@@ -88,6 +157,7 @@ def _call_ollama(messages: list[dict], tools: list[dict] | None, model: str | No
 
     global max_prompt_tokens
     max_prompt_tokens = max(max_prompt_tokens, int(data.get("prompt_eval_count") or 0))
+    _add_usage(data.get("prompt_eval_count") or 0, data.get("eval_count") or 0)
     raw = data.get("message", {})
     message = {"role": "assistant", "content": raw.get("content", "")}
     if raw.get("tool_calls"):
@@ -114,12 +184,14 @@ def _call_once(messages: list[dict], tools: list[dict] | None, model: str | None
     if config.PROVIDER == "ollama":
         return _call_ollama(messages, tools, model, temperature, max_tokens)
 
+    model = model or config.model()
     payload = {
-        "model": model or config.model(),
+        "model": model,
         "temperature": config.TEMPERATURE if temperature is None else temperature,
         "max_tokens": max_tokens,
         "seed": config.SEED,
-        "messages": messages,
+        "messages": _cached(messages) if _use_cache(model) else messages,
+        "usage": {"include": True},  # OpenRouter usage accounting: the actual cost of each call
     }
     if tools:
         payload["tools"] = tools
@@ -143,10 +215,16 @@ def _call_once(messages: list[dict], tools: list[dict] | None, model: str | None
             " Wait for the reset, add credits at openrouter.ai to raise the daily cap, "
             "or set LLM_PROVIDER=ollama to use a local model instead."
         )
+    if _out_of_credit(response):
+        raise OutOfCredit(
+            f"OpenRouter refused the request for lack of credit (HTTP {response.status_code}). Add credit or raise "
+            "the key's limit at openrouter.ai, or set LLM_PROVIDER=ollama to use a local model instead."
+        )
     response.raise_for_status()
     data = response.json()
     if "error" in data:
         raise RuntimeError(f"{config.PROVIDER} error: {data['error']}")
+    _record_openrouter_usage(data)
 
     choice = data["choices"][0]
     message = choice["message"]

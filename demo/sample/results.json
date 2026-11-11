@@ -1,0 +1,811 @@
+[
+ {
+  "indicator": "update-check.example",
+  "indicator_type": "domain",
+  "affected_asset": "Host A",
+  "malware": "js.clearfake",
+  "threat_type": "payload_delivery",
+  "intel_source": "misp",
+  "intel_feed": "ThreatFox",
+  "intel_event_id": null,
+  "intel_confidence": 100,
+  "intel_tags": [],
+  "intel_references": [],
+  "threat_ref": null,
+  "evidence_first_seen": "2026-09-13T10:41:00+00:00",
+  "evidence_last_seen": "2026-09-13T10:41:00+00:00",
+  "n_events": 1,
+  "evidence": {
+   "identity": {
+    "indicator": "update-check.example",
+    "indicator_type": "domain",
+    "affected_asset": "Host A",
+    "malware": "js.clearfake",
+    "threat_type": "payload_delivery",
+    "intel_source": "misp",
+    "intel_feed": "ThreatFox",
+    "intel_event_id": null,
+    "intel_confidence": 100,
+    "intel_tags": [],
+    "intel_references": [],
+    "threat_ref": null,
+    "evidence_first_seen": "2026-09-13T10:41:00+00:00",
+    "evidence_last_seen": "2026-09-13T10:41:00+00:00",
+    "n_events": 1
+   },
+   "host": {
+    "ip": "Host A",
+    "hostname": "campus end host"
+   },
+   "flows": {
+    "has_traffic": true,
+    "upload_heavy_over_exfil_threshold": {
+     "count": 0
+    }
+   },
+   "asn": [],
+   "signals": [],
+   "expected": {
+    "malware_profile": {
+     "family": "ClearFake",
+     "notes": "JavaScript injected into compromised legitimate websites that shows a fake browser/software update, which then delivers the real payload. The flagged domain is often the compromised site itself, not attacker infrastructure.",
+     "transport": "web"
+    },
+    "threat_type_profile": {
+     "ioc_role": "payload delivery site",
+     "match_means": "the host downloaded malicious software or a malicious script from it",
+     "victim_traffic": "download a file or script from the site, usually in one short burst",
+     "expected_traffic_shape": "Download-heavy: down_bytes much greater than up_bytes, usually within one short burst/session rather than spread thin.",
+     "expected_recurrence": "Often a single occurrence, or a short cluster on one day. Ongoing recurrence across many days is not required for a genuine hit.",
+     "false_positive_pattern": "A tiny transfer (a few KB, typical of ordinary page/asset loads), or no clear payload-sized download at all."
+    },
+    "service": null
+   },
+   "baseline": {
+    "verdict": "LIKELY_FALSE_POSITIVE",
+    "confidence": "medium",
+    "rule": 4,
+    "reason": "sample"
+   },
+   "host_type": {
+    "label": "end host",
+    "name": "end host",
+    "confidence": 0.8,
+    "comparison": {}
+   },
+   "timeline": {
+    "rows": [
+     {
+      "id": "F1",
+      "episode": 1,
+      "flagged": false,
+      "start": "2026-09-13T10:37:00",
+      "end": "2026-09-13T10:38:00",
+      "minutes": 2,
+      "server_ip": "203.0.113.20",
+      "port": 443,
+      "protocol": "tcp",
+      "ip_count": 1,
+      "up_bytes": 90000,
+      "down_bytes": 4200000,
+      "flows": 1,
+      "name": "videohub.example",
+      "remote": "videohub.example (adult content)"
+     },
+     {
+      "id": "F2",
+      "episode": 1,
+      "flagged": false,
+      "start": "2026-09-13T10:41:00",
+      "end": "2026-09-13T10:42:00",
+      "minutes": 2,
+      "server_ip": "203.0.113.31",
+      "port": 443,
+      "protocol": "tcp",
+      "ip_count": 1,
+      "up_bytes": 3000,
+      "down_bytes": 20000,
+      "flows": 1,
+      "name": "exosrv.com",
+      "remote": "exosrv.com (ad network)"
+     },
+     {
+      "id": "F3",
+      "episode": 1,
+      "flagged": true,
+      "start": "2026-09-13T10:41:00",
+      "end": "2026-09-13T10:42:00",
+      "minutes": 2,
+      "server_ip": "203.0.113.45",
+      "port": 443,
+      "protocol": "tcp",
+      "ip_count": 1,
+      "up_bytes": 4000,
+      "down_bytes": 38000,
+      "flows": 1,
+      "name": "update-check.example",
+      "remote": "1 name(s) on the flagged address: update-check.example"
+     }
+    ],
+    "episodes": [
+     {
+      "n": 1,
+      "start": "2026-09-13T10:37:00",
+      "end": "2026-09-13T10:42:00"
+     }
+    ]
+   },
+   "chart_options": [
+    {
+     "id": "contact",
+     "title": "Traffic between the host and the flagged address, per minute",
+     "kind": "line",
+     "caption": "Every minute of contact with the flagged address.",
+     "sql": "",
+     "x": "time",
+     "y": [
+      "up_bytes",
+      "down_bytes"
+     ],
+     "series_column": null,
+     "unit": "bytes",
+     "log_scale": false,
+     "x_type": "time",
+     "series": [
+      {
+       "name": "upload",
+       "points": [
+        [
+         "2026-09-13T10:37:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:38:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:39:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:40:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:41:00+00:00",
+         4000.0
+        ],
+        [
+         "2026-09-13T10:42:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:43:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:44:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:45:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:46:00+00:00",
+         0.0
+        ]
+       ]
+      },
+      {
+       "name": "download",
+       "points": [
+        [
+         "2026-09-13T10:37:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:38:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:39:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:40:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:41:00+00:00",
+         38000.0
+        ],
+        [
+         "2026-09-13T10:42:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:43:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:44:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:45:00+00:00",
+         0.0
+        ],
+        [
+         "2026-09-13T10:46:00+00:00",
+         0.0
+        ]
+       ]
+      }
+     ],
+     "omitted_series": 0,
+     "truncated_bars": 0,
+     "highlight": [
+      "Host A"
+     ],
+     "markers": [
+      {
+       "start": "2026-09-13T10:41:00+00:00",
+       "end": "2026-09-13T10:41:00+00:00",
+       "label": "flagged contact"
+      }
+     ],
+     "source": "subscriber_activity_1m",
+     "columns": [
+      "time",
+      "up_bytes",
+      "down_bytes"
+     ],
+     "rows": [
+      [
+       "2026-09-13T10:37:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:38:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:39:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:40:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:41:00+00:00",
+       4000,
+       38000
+      ],
+      [
+       "2026-09-13T10:42:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:43:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:44:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:45:00+00:00",
+       0,
+       0
+      ],
+      [
+       "2026-09-13T10:46:00+00:00",
+       0,
+       0
+      ]
+     ]
+    }
+   ],
+   "behaviour": {
+    "label": "ad or redirect"
+   }
+  },
+  "VERDICT": "LIKELY_FALSE_POSITIVE",
+  "CONFIDENCE": "medium",
+  "HOST_ROLE": "Probably a personal laptop in student housing: busy in the evening, quiet overnight.",
+  "LIKELY_USER": "student - streaming and adult video sites (videohub.example) carry most of its traffic",
+  "HEADLINE": "A pop-up ad loaded by an open adult video page, not a malware download.",
+  "FLOW_NOTES": "F1: video page on the adult site, already open\nF2: pop-up ad network loaded by that page\nF3: flagged domain, same minute as the pop-up",
+  "REPORT": "## Executive summary\nAt 10:41 UTC (21:41 AEDT) on 13 September the student laptop Host A fetched 38 KB from update-check.example, a domain listed for ClearFake fake-update pages. An adult video site was already open and an ad network loaded in the same minute ([[flow F1-F3]]), so this was most likely a pop-up ad. The host sent 4 KB and received 38 KB, far below a payload. The evidence reaches the contact grade only. Close the alert after the checks below.\n\n## Background\n### The host\nThe host looks like a personal laptop: its traffic is mostly streaming and adult video (videohub.example), and it is quiet overnight, which points to a student's own device.\n### The threat\nClearFake injects a fake browser-update prompt into compromised sites; a user who accepts it downloads a loader.\n### What an affected host looks like\nA page visit, then a download of a few megabytes from the update domain, then new outbound connections.\n\n## Analysis\n### When and how\nThe single contact was at 10:41 UTC (21:41 AEDT) ([[flow F3]]). The video page had been open since 10:37 UTC ([[flow F1]]) and the ad network appeared at 10:41 UTC ([[flow F2]]).\n### Against an affected host\nThe host received 38 KB from the flagged domain: a page or script, not a payload, and nothing followed. As [[chart contact]] shows, there was no further contact.\n\n## Conclusion and next steps\nLikely false positive, medium confidence: the sequence fits a pop-up ad and no download followed.\n1. Close the alert.\n2. Alert on any repeat contact from Host A to update-check.example.",
+  "flow_notes": {
+   "F1": "video page on the adult site, already open",
+   "F2": "pop-up ad network loaded by that page",
+   "F3": "flagged domain, same minute as the pop-up"
+  },
+  "verdict_given": true,
+  "SECTIONS": {
+   "summary": "At 10:41 UTC (21:41 AEDT) on 13 September the student laptop Host A fetched 38 KB from update-check.example, a domain listed for ClearFake fake-update pages. An adult video site was already open and an ad network loaded in the same minute ([[flow F1-F3]]), so this was most likely a pop-up ad. The host sent 4 KB and received 38 KB, far below a payload. The evidence reaches the contact grade only. Close the alert after the checks below.",
+   "analysis": "### When and how\nThe single contact was at 10:41 UTC (21:41 AEDT) ([[flow F3]]). The video page had been open since 10:37 UTC ([[flow F1]]) and the ad network appeared at 10:41 UTC ([[flow F2]]).\n### Against an affected host\nThe host received 38 KB from the flagged domain: a page or script, not a payload, and nothing followed. As [[chart contact]] shows, there was no further contact.",
+   "conclusion": "Likely false positive, medium confidence: the sequence fits a pop-up ad and no download followed.\n1. Close the alert.\n2. Alert on any repeat contact from Host A to update-check.example.",
+   "background": "### The host\nThe host looks like a personal laptop: its traffic is mostly streaming and adult video (videohub.example), and it is quiet overnight, which points to a student's own device.\n### The threat\nClearFake injects a fake browser-update prompt into compromised sites; a user who accepts it downloads a loader.\n### What an affected host looks like\nA page visit, then a download of a few megabytes from the update domain, then new outbound connections."
+  },
+  "model_verdict": "LIKELY_FALSE_POSITIVE",
+  "model_confidence": "medium",
+  "baseline_verdict": "LIKELY_FALSE_POSITIVE",
+  "report_source": "analysis",
+  "verdict_notes": [],
+  "charts": [
+   {
+    "id": "contact",
+    "title": "Traffic between the host and the flagged address, per minute",
+    "kind": "line",
+    "caption": "Every minute of contact with the flagged address.",
+    "sql": "",
+    "x": "time",
+    "y": [
+     "up_bytes",
+     "down_bytes"
+    ],
+    "series_column": null,
+    "unit": "bytes",
+    "log_scale": false,
+    "x_type": "time",
+    "series": [
+     {
+      "name": "upload",
+      "points": [
+       [
+        "2026-09-13T10:37:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:38:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:39:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:40:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:41:00+00:00",
+        4000.0
+       ],
+       [
+        "2026-09-13T10:42:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:43:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:44:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:45:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:46:00+00:00",
+        0.0
+       ]
+      ]
+     },
+     {
+      "name": "download",
+      "points": [
+       [
+        "2026-09-13T10:37:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:38:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:39:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:40:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:41:00+00:00",
+        38000.0
+       ],
+       [
+        "2026-09-13T10:42:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:43:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:44:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:45:00+00:00",
+        0.0
+       ],
+       [
+        "2026-09-13T10:46:00+00:00",
+        0.0
+       ]
+      ]
+     }
+    ],
+    "omitted_series": 0,
+    "truncated_bars": 0,
+    "highlight": [
+     "Host A"
+    ],
+    "markers": [
+     {
+      "start": "2026-09-13T10:41:00+00:00",
+      "end": "2026-09-13T10:41:00+00:00",
+      "label": "flagged contact"
+     }
+    ],
+    "source": "subscriber_activity_1m",
+    "columns": [
+     "time",
+     "up_bytes",
+     "down_bytes"
+    ],
+    "rows": [
+     [
+      "2026-09-13T10:37:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:38:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:39:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:40:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:41:00+00:00",
+      4000,
+      38000
+     ],
+     [
+      "2026-09-13T10:42:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:43:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:44:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:45:00+00:00",
+      0,
+      0
+     ],
+     [
+      "2026-09-13T10:46:00+00:00",
+      0,
+      0
+     ]
+    ]
+   }
+  ],
+  "unverified_numbers": [],
+  "consistency_flags": [],
+  "needs_review": false,
+  "behaviour": {
+   "label": "ad or redirect"
+  },
+  "sample": true
+ },
+ {
+  "indicator": "203.0.113.80:443",
+  "indicator_type": "ip:port",
+  "affected_asset": "Host B",
+  "malware": "win.nanocore",
+  "threat_type": "botnet_cc",
+  "intel_source": "misp",
+  "intel_feed": "Example C2 blocklist",
+  "intel_event_id": null,
+  "intel_confidence": null,
+  "intel_tags": [],
+  "intel_references": [],
+  "threat_ref": null,
+  "evidence_first_seen": "2026-09-14T08:12:00+00:00",
+  "evidence_last_seen": "2026-09-14T08:12:00+00:00",
+  "n_events": 1,
+  "evidence": {
+   "identity": {
+    "indicator": "203.0.113.80:443",
+    "indicator_type": "ip:port",
+    "affected_asset": "Host B",
+    "malware": "win.nanocore",
+    "threat_type": "botnet_cc",
+    "intel_source": "misp",
+    "intel_feed": "Example C2 blocklist",
+    "intel_event_id": null,
+    "intel_confidence": null,
+    "intel_tags": [],
+    "intel_references": [],
+    "threat_ref": null,
+    "evidence_first_seen": "2026-09-14T08:12:00+00:00",
+    "evidence_last_seen": "2026-09-14T08:12:00+00:00",
+    "n_events": 1
+   },
+   "host": {
+    "ip": "Host B",
+    "hostname": "campus NAT gateway"
+   },
+   "flows": {
+    "has_traffic": true,
+    "upload_heavy_over_exfil_threshold": {
+     "count": 0
+    }
+   },
+   "asn": [],
+   "signals": [],
+   "expected": {
+    "malware_profile": {
+     "family": "NanoCore RAT",
+     "notes": "Windows remote-access trojan, usually delivered by phishing. Used to steal credentials, log keystrokes and spy through the webcam. The victim opens an outbound TCP connection to a C2 host and port set by the operator (often a dynamic-DNS name or a tunnelling service) and sends stolen data back over it. The C2 channel is NanoCore's own binary protocol over plain TCP: not normal HTTPS browsing (no TLS SNI to a website) and never QUIC (UDP/443).",
+     "platform": "windows",
+     "transport": "custom_tcp",
+     "victim_traffic": "hold a connection to its C2 host on an operator-chosen TCP port using NanoCore's own protocol, not normal HTTPS browsing or QUIC, and send stolen data back"
+    },
+    "threat_type_profile": {
+     "ioc_role": "command-and-control (C2) server",
+     "match_means": "the host is infected and being controlled by an attacker",
+     "victim_traffic": "connect out to the C2 server repeatedly, with regular short check-ins or one persistent connection to the C2 port, and send stolen data back over it",
+     "expected_traffic_shape": "The victim connects OUT to the C2 host on the operator's chosen port. Either repeated short check-ins at a regular interval, or one persistent connection to the C2 port, with bursts of upload when data is stolen.",
+     "expected_recurrence": "Recurring contact across days. Daily presence alone is not a beacon: any service used daily is present daily. Look for regular short check-ins, or a persistent session to the C2 port.",
+     "false_positive_pattern": "Traffic that fits a known legitimate service on that IP and port, a shared cloud/CDN IP where many unrelated hosts and hostnames also appear, or a single isolated contact.",
+     "shared_ip_rule": "An ip:443 indicator on a CDN or shared cloud front end (Cloudflare, AWS Global Accelerator, CloudFront, Akamai, Fastly) is weak on its own: one IP serves thousands of unrelated sites. It only counts with an SNI/domain match to a bad domain, or a non-web traffic shape (regular check-ins, a custom protocol on a non-web port)."
+    },
+    "service": null
+   },
+   "baseline": {
+    "verdict": "LIKELY_FALSE_POSITIVE",
+    "confidence": "medium",
+    "rule": 4,
+    "reason": "sample"
+   },
+   "host_type": {
+    "label": "NAT gateway",
+    "name": "NAT gateway",
+    "confidence": 0.8,
+    "comparison": {}
+   },
+   "timeline": {
+    "rows": [
+     {
+      "id": "F1",
+      "episode": 1,
+      "flagged": true,
+      "start": "2026-09-14T08:12:00",
+      "end": "2026-09-14T08:13:00",
+      "minutes": 2,
+      "server_ip": "203.0.113.80",
+      "port": 443,
+      "protocol": "udp",
+      "ip_count": 1,
+      "up_bytes": 40000,
+      "down_bytes": 900000,
+      "flows": 1,
+      "name": "streamvideo.example",
+      "remote": "streamvideo.example (streaming)"
+     }
+    ],
+    "episodes": [
+     {
+      "n": 1,
+      "start": "2026-09-14T08:12:00",
+      "end": "2026-09-14T08:13:00"
+     }
+    ]
+   },
+   "chart_options": [
+    {
+     "id": "sites_on_ip",
+     "title": "Sites on 203.0.113.80, by campus hosts that used them",
+     "kind": "bar",
+     "caption": "Every site seen on the flagged address; the site this host used is highlighted.",
+     "sql": "",
+     "x": "site",
+     "y": [
+      "hosts"
+     ],
+     "series_column": null,
+     "unit": "count",
+     "log_scale": false,
+     "x_type": "category",
+     "series": [
+      {
+       "name": "hosts",
+       "points": [
+        [
+         "streamvideo.example",
+         180.0
+        ],
+        [
+         "news.example",
+         95.0
+        ],
+        [
+         "shop.example",
+         40.0
+        ],
+        [
+         "games.example",
+         12.0
+        ]
+       ]
+      }
+     ],
+     "omitted_series": 0,
+     "truncated_bars": 0,
+     "highlight": [
+      "streamvideo.example"
+     ],
+     "markers": [],
+     "source": "subscriber_activity_1m",
+     "columns": [
+      "site",
+      "hosts"
+     ],
+     "rows": [
+      [
+       "streamvideo.example",
+       180
+      ],
+      [
+       "news.example",
+       95
+      ],
+      [
+       "shop.example",
+       40
+      ],
+      [
+       "games.example",
+       12
+      ]
+     ]
+    }
+   ],
+   "behaviour": {
+    "label": "ad or redirect"
+   }
+  },
+  "VERDICT": "LIKELY_FALSE_POSITIVE",
+  "CONFIDENCE": "high",
+  "HOST_ROLE": "A shared NAT gateway: busy around the clock with many unrelated sites.",
+  "LIKELY_USER": "unclear - many devices share the address",
+  "HEADLINE": "Ordinary video streaming through a shared CDN address that a C2 report also named.",
+  "FLOW_NOTES": "F1: video streaming over QUIC on the shared CDN address",
+  "REPORT": "## Executive summary\nAt 08:12 UTC (18:12 AEST) on 14 September the gateway Host B reached 203.0.113.80 on UDP port 443, an address a feed lists for NanoCore command and control. The name used was a video service (streamvideo.example) and the traffic was QUIC, which NanoCore never uses. The host sent 40 KB and received 900 KB. The evidence reaches the contact grade only. Close the alert.\n\n## Background\n### The host\nA NAT gateway: one address that many devices share, busy day and night.\n### The threat\nNanoCore is a Windows remote-access trojan that holds a TCP connection to its operator's server.\n### What an affected host looks like\nOne long TCP connection to an unusual port, small steady traffic, with uploads when data is stolen.\n\n## Analysis\n### What the contact was\nThe flagged address is a shared CDN front end used by 180 campus hosts, and this host used it for streamvideo.example over QUIC ([[flow F1]]). As [[chart sites_on_ip]] shows, the address serves many unrelated sites.\n\n## Conclusion and next steps\nLikely false positive, high confidence: the flagged address is shared and the traffic was streaming.\n1. Close the alert.\n2. Ask the feed to drop shared CDN addresses.",
+  "flow_notes": {
+   "F1": "video streaming over QUIC on the shared CDN address"
+  },
+  "verdict_given": true,
+  "SECTIONS": {
+   "summary": "At 08:12 UTC (18:12 AEST) on 14 September the gateway Host B reached 203.0.113.80 on UDP port 443, an address a feed lists for NanoCore command and control. The name used was a video service (streamvideo.example) and the traffic was QUIC, which NanoCore never uses. The host sent 40 KB and received 900 KB. The evidence reaches the contact grade only. Close the alert.",
+   "analysis": "### What the contact was\nThe flagged address is a shared CDN front end used by 180 campus hosts, and this host used it for streamvideo.example over QUIC ([[flow F1]]). As [[chart sites_on_ip]] shows, the address serves many unrelated sites.",
+   "conclusion": "Likely false positive, high confidence: the flagged address is shared and the traffic was streaming.\n1. Close the alert.\n2. Ask the feed to drop shared CDN addresses.",
+   "background": "### The host\nA NAT gateway: one address that many devices share, busy day and night.\n### The threat\nNanoCore is a Windows remote-access trojan that holds a TCP connection to its operator's server.\n### What an affected host looks like\nOne long TCP connection to an unusual port, small steady traffic, with uploads when data is stolen."
+  },
+  "model_verdict": "LIKELY_FALSE_POSITIVE",
+  "model_confidence": "high",
+  "baseline_verdict": "LIKELY_FALSE_POSITIVE",
+  "report_source": "analysis",
+  "verdict_notes": [],
+  "charts": [
+   {
+    "id": "sites_on_ip",
+    "title": "Sites on 203.0.113.80, by campus hosts that used them",
+    "kind": "bar",
+    "caption": "Every site seen on the flagged address; the site this host used is highlighted.",
+    "sql": "",
+    "x": "site",
+    "y": [
+     "hosts"
+    ],
+    "series_column": null,
+    "unit": "count",
+    "log_scale": false,
+    "x_type": "category",
+    "series": [
+     {
+      "name": "hosts",
+      "points": [
+       [
+        "streamvideo.example",
+        180.0
+       ],
+       [
+        "news.example",
+        95.0
+       ],
+       [
+        "shop.example",
+        40.0
+       ],
+       [
+        "games.example",
+        12.0
+       ]
+      ]
+     }
+    ],
+    "omitted_series": 0,
+    "truncated_bars": 0,
+    "highlight": [
+     "streamvideo.example"
+    ],
+    "markers": [],
+    "source": "subscriber_activity_1m",
+    "columns": [
+     "site",
+     "hosts"
+    ],
+    "rows": [
+     [
+      "streamvideo.example",
+      180
+     ],
+     [
+      "news.example",
+      95
+     ],
+     [
+      "shop.example",
+      40
+     ],
+     [
+      "games.example",
+      12
+     ]
+    ]
+   }
+  ],
+  "unverified_numbers": [],
+  "consistency_flags": [],
+  "needs_review": false,
+  "behaviour": {
+   "label": "ad or redirect"
+  },
+  "sample": true
+ }
+]

@@ -5,14 +5,19 @@ matching per-minute row, so one held-open connection can produce thousands
 of matches. Grouping first means the model judges the host's whole
 relationship with the indicator, not one arbitrary row.
 
-The feed is only the trigger list plus ThreatFox context. The behavioural
-evidence comes from live ClickHouse queries (tools.py). This module pulls
-just enough from the feed (which IPs, roughly when) to seed those queries.
+The feed is only the trigger list plus the indicator's threat intel (the
+`intel` block: MISP, ThreatFox or a manual entry). The behavioural evidence
+comes from live ClickHouse queries (tools.py). This module pulls just enough
+from the feed (which IPs, roughly when) to seed those queries.
 
-Note on dates: the feed's threatfox.first_seen_utc / last_seen_utc are the
-matched flow's start and finish, NOT the dates on the ThreatFox entry. They
-are exposed here as evidence_first_seen / evidence_last_seen. Real ThreatFox
-dates can be added by hand in data/ioc_metadata.json (see load_ioc_metadata).
+Older feeds carry a `threatfox` block instead of `intel`; intel() and
+load_matches() map it to `intel` with source "threatfox".
+
+Note on dates: the feed's intel.first_seen_utc / last_seen_utc are the
+matched flow's start and finish, NOT the source's dates for the indicator.
+They are exposed here as evidence_first_seen / evidence_last_seen. The
+source's own dates, where known, are in intel.source_first_seen /
+source_last_seen, and can also be added by hand in data/ioc_metadata.json.
 """
 from __future__ import annotations
 
@@ -62,18 +67,74 @@ def read_records(path: Path) -> list[dict]:
     raise SystemExit(f"{path} does not contain match records (a JSON list, or one JSON object per line)")
 
 
-def load_matches(path: Path) -> list[dict]:
-    matches = read_records(path)
+INTEL_SOURCES = ("misp", "threatfox", "manual")
+SOURCE_NAMES = {"misp": "MISP", "threatfox": "ThreatFox", "manual": "manual entry"}
+
+
+def source_name(identity: dict) -> str:
+    """'MISP (feed name)', 'ThreatFox', 'manual entry'."""
+    source = identity.get("intel_source") or ""
+    if not source and "threatfox_confidence" in identity:
+        source = "threatfox"  # a result saved before the intel block
+    name = SOURCE_NAMES.get(source, source or "unknown source")
+    feed = identity.get("intel_feed")
+    if feed and feed.lower() != name.lower():
+        name += f" ({feed})"
+    return name
+
+
+def confidence_text(identity: dict) -> str:
+    """'80/100', or a plain note when the source gave none."""
+    value = identity.get("intel_confidence", identity.get("threatfox_confidence"))
+    if value is None:
+        return "not given by the source"
+    return f"{value}/100"
+
+
+def _from_threatfox(block: dict) -> dict:
+    """An old feed's `threatfox` block as an `intel` block."""
+    return {
+        "source": "threatfox",
+        "feed": "ThreatFox",
+        "event_id": None,
+        "threat_type": block.get("threat_type"),
+        "malware": block.get("malware"),
+        "confidence": block.get("confidence"),
+        "tags": block.get("tags") or [],
+        "first_seen_utc": block.get("first_seen_utc"),
+        "last_seen_utc": block.get("last_seen_utc"),
+        "references": block.get("references") or [],
+        "threat_ref": None,
+    }
+
+
+def intel(record: dict) -> dict:
+    """The record's intel block; an old `threatfox` block is mapped to one."""
+    if isinstance(record.get("intel"), dict):
+        return record["intel"]
+    if isinstance(record.get("threatfox"), dict):
+        return _from_threatfox(record["threatfox"])
+    return {}
+
+
+def normalise_record(record: dict) -> dict:
+    """In place: the host field renamed to affected_asset (FEED_ASSET_FIELD)
+    and an old `threatfox` block replaced by `intel`."""
     field = config.FEED_ASSET_FIELD
-    for m in matches:
-        if field != "affected_asset" and field in m:
-            m["affected_asset"] = m.pop(field)
-    return matches
+    if field != "affected_asset" and field in record:
+        record["affected_asset"] = record.pop(field)
+    if "intel" not in record and isinstance(record.get("threatfox"), dict):
+        record["intel"] = _from_threatfox(record.pop("threatfox"))
+    return record
+
+
+def load_matches(path: Path) -> list[dict]:
+    return [normalise_record(m) for m in read_records(path)]
 
 
 def load_ioc_metadata(path: Path = config.IOC_METADATA_PATH) -> dict[str, dict]:
-    """Optional hand-filled ThreatFox fields per indicator, e.g.
-    {"bore.pub": {"threatfox_first_seen": "...", "threatfox_last_seen": "...",
+    """Optional hand-filled fields from the indicator's source, per indicator, e.g.
+    {"bore.pub": {"source_first_seen": "...", "source_last_seen": "...",
                   "reporter": "...", "is_compromised": false, "ioc_id": 123}}.
     Returns {} when the file is absent."""
     if not path.exists():
@@ -119,11 +180,11 @@ def asset_ioc_index(matches: list[dict]) -> dict[str, list[dict]]:
         if not asset or not indicator or (asset, indicator) in seen:
             continue
         seen.add((asset, indicator))
-        threatfox = m.get("threatfox", {})
+        info = intel(m)
         index[asset].append({
             "indicator": indicator,
-            "malware": threatfox.get("malware"),
-            "threat_type": threatfox.get("threat_type"),
+            "malware": info.get("malware"),
+            "threat_type": info.get("threat_type"),
         })
     return index
 
@@ -154,6 +215,12 @@ def feed_server_ips(case_rows: list[dict]) -> list[dict]:
     ]
 
 
+def is_ip(value: str) -> bool:
+    """A plain IPv4 address (the only format SuperNetFlow stores)."""
+    parts = (value or "").strip().split(".")
+    return len(parts) == 4 and all(p.isdigit() and int(p) <= 255 for p in parts)
+
+
 def parse_ip_port(indicator: str) -> tuple[str, int | None] | None:
     """(ip, port) for an 'ip:port' indicator, else None."""
     if indicator.count(":") != 1:
@@ -167,10 +234,10 @@ def parse_ip_port(indicator: str) -> tuple[str, int | None] | None:
 def case_identity(key: tuple[str, str], rows: list[dict], ioc_metadata: dict[str, dict] | None = None) -> dict:
     """Step 2: the IOC context for one case."""
     indicator, asset = key
-    threatfox = rows[0].get("threatfox", {})
+    info = intel(rows[0])
 
-    first_times = [_parse_time(r.get("threatfox", {}).get("first_seen_utc")) for r in rows]
-    last_times = [_parse_time(r.get("threatfox", {}).get("last_seen_utc")) for r in rows]
+    first_times = [_parse_time(intel(r).get("first_seen_utc")) for r in rows]
+    last_times = [_parse_time(intel(r).get("last_seen_utc")) for r in rows]
     first_times = [t for t in first_times if t]
     last_times = [t for t in last_times if t]
     evidence_first = min(first_times) if first_times else None
@@ -180,15 +247,33 @@ def case_identity(key: tuple[str, str], rows: list[dict], ioc_metadata: dict[str
         "indicator_type": rows[0].get("indicator_type"),
         "indicator": indicator,
         "affected_asset": asset,
-        "malware": threatfox.get("malware"),
-        "threat_type": threatfox.get("threat_type"),
-        "threatfox_confidence": threatfox.get("confidence"),
+        "malware": info.get("malware"),
+        "threat_type": info.get("threat_type"),
+        "intel_source": info.get("source") or "unknown",
+        "intel_feed": info.get("feed"),
+        "intel_event_id": info.get("event_id"),
+        "intel_confidence": _confidence(info.get("confidence")),
+        "intel_tags": list(info.get("tags") or []),
+        "intel_references": list(info.get("references") or []),
+        "threat_ref": info.get("threat_ref"),
+        "intel_source_first_seen": info.get("source_first_seen"),
+        "intel_source_last_seen": info.get("source_last_seen"),
         "evidence_first_seen": evidence_first.isoformat() if evidence_first else None,
         "evidence_last_seen": evidence_last.isoformat() if evidence_last else None,
         "ioc_metadata": (ioc_metadata or {}).get(indicator),
         "match_ids": [r.get("match_id") for r in rows],
         "n_events": len(rows),
     }
+
+
+def _confidence(value) -> int | None:
+    """0-100, or None when the source gives none (MISP often has none)."""
+    if value is None or value == "":
+        return None
+    try:
+        return max(0, min(100, int(float(value))))
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -329,7 +414,7 @@ def feed_minutes(case_rows: list[dict], server_ips: list[str]):
 
 def match_windows(case_rows: list[dict], minutes: int) -> list[tuple[datetime, datetime]]:
     """±minutes around each feed match, merged where they overlap."""
-    times = sorted({t for t in (_parse_time(r.get("threatfox", {}).get("first_seen_utc")) for r in case_rows) if t})
+    times = sorted({t for t in (_parse_time(intel(r).get("first_seen_utc")) for r in case_rows) if t})
     pad = timedelta(minutes=minutes)
     windows: list[list[datetime]] = []
     for t in times:

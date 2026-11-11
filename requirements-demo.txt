@@ -1,0 +1,5 @@
+# Optional: the stand demo dashboard (streamlit run dashboard/app.py)
+-r requirements.txt
+streamlit>=1.40
+pypdf>=4.0          # the demo's anonymisation test reads the bundled PDFs
+pypdfium2>=4.0      # the dashboard's inline PDF view (page images)

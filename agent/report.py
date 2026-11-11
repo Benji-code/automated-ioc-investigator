@@ -22,7 +22,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import analysis, casefile, charts as chart_tools, config, correlation, host_type, mdrender, tools
+from . import analysis, casefile, charts as chart_tools, config, correlation, evidence, host_type, mdrender, tools
 
 VERDICT_ORDER = {"LIKELY_THREAT": 0, "SUSPICIOUS": 1, "LIKELY_FALSE_POSITIVE": 2, "INSUFFICIENT_DATA": 3}
 VERDICT_STYLE = {  # css class, label
@@ -358,7 +358,8 @@ def _when(value) -> str:
     return f"{text} UTC" + (f" ({local})" if local else "")
 
 
-def _facts(result: dict) -> str:
+def fact_rows(result: dict) -> list[tuple[str, str]]:
+    """(label, value) facts about the case, for the facts box and the PDF's facts table."""
     ev = result.get("evidence") or {}
     host = ev.get("host") or {}
     malware = " / ".join(x for x in (result.get("malware"), result.get("threat_type")) if x) or "?"
@@ -369,7 +370,8 @@ def _facts(result: dict) -> str:
     rows = [
         ("Internal host", f"{result['affected_asset']}" + (f" ({host['hostname']})" if host.get("hostname") else "")),
         ("Indicator", f"{result['indicator']} ({result.get('indicator_type') or '?'})"),
-        ("ThreatFox listing", f"{malware}; reporter confidence {result.get('threatfox_confidence', '?')}%"),
+        ("Indicator source", f"{evidence.source_name(result)}: {malware}; source confidence "
+                             f"{evidence.confidence_text(result)}"),
         ("Matched evidence", f"{_when(result.get('evidence_first_seen'))} to {_when(result.get('evidence_last_seen'))}"
                              f" ({result.get('n_events', '?')} feed match(es))"),
     ]
@@ -386,7 +388,11 @@ def _facts(result: dict) -> str:
     user = _user(result)
     if user:
         rows.append(("Likely user (from its activity)", user))
-    items = "".join(f"<div><dt>{e(k)}</dt><dd>{e(v)}</dd></div>" for k, v in rows)
+    return rows
+
+
+def _facts(result: dict) -> str:
+    items = "".join(f"<div><dt>{e(k)}</dt><dd>{e(v)}</dd></div>" for k, v in fact_rows(result))
     return f"<dl class='facts'>{items}</dl>"
 
 
@@ -420,7 +426,7 @@ def linked_domain_notes(results: list[dict]) -> list[str]:
                           + (f", first seen {d['campus_first_seen'][:10]}" if d.get("campus_first_seen") else "") + ".")
             notes[d["domain"]] = (
                 f"{d['domain']} is behind {len(d['indicators'])} flagged addresses ({', '.join(d['indicators'])})"
-                f"{normal}; the IOC was probably reported against this domain. Check it on ThreatFox: if it is not "
+                f"{normal}; the IOC was probably reported against this domain. Check it at the indicator's source: if it is not "
                 f"listed, the cases that only browsed it are clean false positives.{campus}")
     return list(notes.values())
 
@@ -522,7 +528,7 @@ def render(results: list[dict]) -> str:
         results,
         key=lambda r: (VERDICT_ORDER.get(r.get("VERDICT"), 1), not r.get("needs_review"),
                        (((r.get("evidence") or {}).get("correlation") or {}).get("domains") or [{"domain": "~"}])[0]["domain"],
-                       -(r.get("threatfox_confidence") or 0)),
+                       -(r.get("intel_confidence") or 0)),
     )
     counts = {v: sum(1 for r in results if r.get("VERDICT") == v) for v in VERDICT_ORDER}
     review_count = sum(1 for r in results if r.get("needs_review"))
@@ -553,7 +559,7 @@ def render(results: list[dict]) -> str:
     <div>
       <div class="eyebrow">{org + ' · ' if org else ''}Security operations</div>
       <h1>{TITLE}</h1>
-      <p class="sub">ThreatFox indicator matches investigated against SuperNetFlow flow records · generated {generated}</p>
+      <p class="sub">Threat-intelligence indicator matches investigated against SuperNetFlow flow records · generated {generated}</p>
     </div>
     <div class="marking">Sensitive · internal use only</div>
   </div>
@@ -562,7 +568,7 @@ def render(results: list[dict]) -> str:
   <section class="overview">
     <div class="tiles">{tiles_html}</div>
     <details class="about"><summary>How these cases were investigated</summary>
-      <p>Each case is one {e(config.HOST_LABEL)}'s contact with a ThreatFox indicator (one case covers a visit that
+      <p>Each case is one {e(config.HOST_LABEL)}'s contact with a flagged indicator (one case covers a visit that
       matched several flagged addresses of the same site). Fixed checks first gather the evidence from SuperNetFlow:
       the flows to the flagged address, the names the host used on it, its per-minute contact pattern, app labels, the
       host's other traffic and uptime, DNS behaviour and the other campus hosts on the address. An investigation agent

@@ -8,7 +8,7 @@ Each signal reads the gathered evidence and says which way it points:
 Threat-side signals also carry a strength. "strong" is direct evidence
 (a bad name, regular check-ins, the abuse pattern of a known service, peers
 flagged for the same family); "weak" is circumstantial (a rare or new domain,
-a platform hint, a port that fits). ThreatFox confidence is deliberately not
+a platform hint, a port that fits). The source's confidence is deliberately not
 a signal: it rates the indicator, not this host.
 
 The baseline is the verdict. The model reviews the evidence blind (it never

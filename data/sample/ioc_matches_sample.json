@@ -3,12 +3,18 @@
     "indicator_type": "domain",
     "indicator": "bore.pub",
     "affected_asset": "192.0.2.10",
-    "threatfox": {
+    "intel": {
+      "source": "threatfox",
+      "feed": "ThreatFox",
+      "event_id": null,
+      "threat_type": "botnet_cc",
+      "malware": "win.nanocore",
       "confidence": 100,
+      "tags": [],
       "first_seen_utc": "2026-09-15T10:00:00Z",
       "last_seen_utc": "2026-09-15T10:00:00Z",
-      "malware": "win.nanocore",
-      "threat_type": "botnet_cc"
+      "references": [],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [
@@ -48,12 +54,18 @@
     "indicator_type": "domain",
     "indicator": "bore.pub",
     "affected_asset": "192.0.2.10",
-    "threatfox": {
+    "intel": {
+      "source": "threatfox",
+      "feed": "ThreatFox",
+      "event_id": null,
+      "threat_type": "botnet_cc",
+      "malware": "win.nanocore",
       "confidence": 100,
+      "tags": [],
       "first_seen_utc": "2026-09-15T10:01:00Z",
       "last_seen_utc": "2026-09-15T10:01:00Z",
-      "malware": "win.nanocore",
-      "threat_type": "botnet_cc"
+      "references": [],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [
@@ -93,12 +105,18 @@
     "indicator_type": "domain",
     "indicator": "bore.pub",
     "affected_asset": "192.0.2.10",
-    "threatfox": {
+    "intel": {
+      "source": "threatfox",
+      "feed": "ThreatFox",
+      "event_id": null,
+      "threat_type": "botnet_cc",
+      "malware": "win.nanocore",
       "confidence": 100,
+      "tags": [],
       "first_seen_utc": "2026-09-16T23:59:00Z",
       "last_seen_utc": "2026-09-16T23:59:00Z",
-      "malware": "win.nanocore",
-      "threat_type": "botnet_cc"
+      "references": [],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [
@@ -138,12 +156,26 @@
     "indicator_type": "ip:port",
     "indicator": "203.0.113.80:443",
     "affected_asset": "198.51.100.23",
-    "threatfox": {
-      "confidence": 75,
+    "intel": {
+      "source": "misp",
+      "feed": "Example public C2 feed",
+      "event_id": "1042",
+      "threat_type": "botnet_cc",
+      "malware": "win.nanocore",
+      "confidence": null,
+      "tags": [
+        "tlp:white",
+        "misp-galaxy:malpedia=\"NanoCore\"",
+        "kill-chain:command-and-control"
+      ],
       "first_seen_utc": "2026-09-14T08:12:00Z",
       "last_seen_utc": "2026-09-14T08:12:00Z",
-      "malware": "win.nanocore",
-      "threat_type": "botnet_cc"
+      "source_first_seen": "2026-09-01T00:00:00Z",
+      "source_last_seen": "2026-09-12T00:00:00Z",
+      "references": [
+        "https://misp.example/events/view/1042"
+      ],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [
@@ -201,12 +233,26 @@
     "indicator_type": "ip:port",
     "indicator": "203.0.113.80:443",
     "affected_asset": "198.51.100.23",
-    "threatfox": {
-      "confidence": 75,
+    "intel": {
+      "source": "misp",
+      "feed": "Example public C2 feed",
+      "event_id": "1042",
+      "threat_type": "botnet_cc",
+      "malware": "win.nanocore",
+      "confidence": null,
+      "tags": [
+        "tlp:white",
+        "misp-galaxy:malpedia=\"NanoCore\"",
+        "kill-chain:command-and-control"
+      ],
       "first_seen_utc": "2026-09-14T08:13:00Z",
       "last_seen_utc": "2026-09-14T08:13:00Z",
-      "malware": "win.nanocore",
-      "threat_type": "botnet_cc"
+      "source_first_seen": "2026-09-01T00:00:00Z",
+      "source_last_seen": "2026-09-12T00:00:00Z",
+      "references": [
+        "https://misp.example/events/view/1042"
+      ],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [
@@ -264,12 +310,18 @@
     "indicator_type": "domain",
     "indicator": "update-check.example",
     "affected_asset": "192.0.2.44",
-    "threatfox": {
+    "intel": {
+      "source": "threatfox",
+      "feed": "ThreatFox",
+      "event_id": null,
+      "threat_type": "payload_delivery",
+      "malware": "js.clearfake",
       "confidence": 100,
+      "tags": [],
       "first_seen_utc": "2026-09-13T21:40:00Z",
       "last_seen_utc": "2026-09-13T21:40:00Z",
-      "malware": "js.clearfake",
-      "threat_type": "payload_delivery"
+      "references": [],
+      "threat_ref": null
     },
     "evidence": {
       "subscriber_activity": [

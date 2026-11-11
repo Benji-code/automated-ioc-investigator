@@ -12,6 +12,7 @@ contradicts the evidence, the case goes to a human.
     python assess.py                                   # the default feed in data/
     python assess.py data/ioc_matches.jsonl --limit 5  # a feed given by name (JSON or JSON Lines)
     python assess.py data/sample/ioc_matches_sample.json --indicator bore.pub
+    python assess.py data/misp_matches.jsonl --pdf --limit 2  # also LaTeX/PDF reports
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ import time
 from functools import partial
 from pathlib import Path
 
-from agent import (behaviour, casefile, charts, config, correlation, db, evidence, host_type, llm_client,
-                   mdrender, report, signals, timeline, tools)
+from agent import (behaviour, casefile, charts, config, correlation, db, evidence, host_type, latex, llm_client,
+                   mdrender, report, signals, timeline, tools, web_context)
 
 HERE = Path(__file__).resolve().parent
 # Local Ollama has no rate limit; OpenRouter's free tier does.
@@ -52,7 +53,8 @@ TEAM_LABEL = f"the {config.ORG_NAME} security team" if config.ORG_NAME else "the
 
 SYSTEM_PROMPT = f"""You are a senior network security analyst investigating IOC (Indicator \
 of Compromise) matches on {config.NETWORK_LABEL} (a university network). Each case is one \
-{config.HOST_LABEL} that contacted an indicator listed on ThreatFox. You investigate the case \
+{config.HOST_LABEL} that contacted an indicator listed by a threat-intelligence source (a MISP \
+feed, ThreatFox, or an analyst's manual entry). You investigate the case \
 and write the report {TEAM_LABEL} will act on.
 {SITE_SECTION}
 You get a CASE FILE with the evidence already gathered: the IOC context, the \
@@ -93,10 +95,19 @@ points to an unclear user.
 rows F1, F2, ... in time order. It shows what the host was doing when the \
 contact happened: the page or app that was open, and what came just before \
 and after it. Rows in the same minute as the flagged contact are its context.
+- EXPECTED BEHAVIOUR comes from the local knowledge base, or, when it says so, \
+from a threat description an analyst supplied (for example about a new CVE). \
+Use that description as the background on the threat and the yardstick for an \
+affected host; it says nothing about whether this host is affected.
+- PUBLIC THREAT INTEL is looked up online for this case: Malpedia's \
+description of the malware family and the indicator's ThreatFox listing. Use \
+it in The threat, naming the source ("Malpedia describes ..."); it describes \
+the threat in general and says nothing about this host.
 - Evidence marked "from the IOC feed, not re-queried" is the feed's own copy \
 of the matched rows: real, but only the matched minutes.
 - The evidence first/last seen times are the matched flow's own times, not \
-ThreatFox's dates. Only reason about ThreatFox dates if the case file gives them.
+the source's dates for the indicator. Only reason about the source's dates if \
+the case file gives them.
 - If the case file shows no traffic between the host and the flagged IP, say \
 so plainly and do not describe traffic that is not there; explain what was \
 checked and what that means. Such a case is recorded as insufficient data \
@@ -131,9 +142,10 @@ fix the query.
 
 Judging the case. An IOC match is a starting point, not proof: judge the \
 behaviour, not the match.
-- ThreatFox confidence says how sure the reporter is that the INDICATOR is \
+- The source's confidence says how sure the reporter is that the INDICATOR is \
 malicious. It says nothing about whether THIS HOST is infected. Never use it \
-to move a verdict to SUSPICIOUS or LIKELY_THREAT.
+to move a verdict to SUSPICIOUS or LIKELY_THREAT. Many MISP indicators carry \
+no confidence at all; that is not evidence either way.
 - An ip:443 indicator on a CDN or shared cloud IP (Cloudflare, AWS) is weak on \
 its own: one IP serves thousands of unrelated sites. What matters is which \
 name the host actually used on it and whether that name is bad. UDP/443 is \
@@ -238,7 +250,27 @@ is not the flagged malware; what the evidence cannot show for this case; then \
 numbered next steps specific to this host (who to contact, what to check, what \
 to alert on), most important first.
 
-Length: a simple case about 700-1,000 words in all; a complex one up to about 1,600.
+Length: about 450 words for the four parts together, so the report fits on one \
+page; the figures and the flow table carry the detail, and the text points to \
+them.
+
+Style:
+- Times in UTC with the local time in brackets where the case file gives it, \
+e.g. "04:34 UTC (15:34 AEDT)".
+- Full IP addresses every time, never shorthand such as "3.11".
+- Always say who sent what: "the host sent 2.1 MB and received 40 KB", never \
+"far more than they got back".
+- Grade the evidence and say which grade the case reaches: contact (the host \
+only reached the indicator), delivery attempt (something came down from it), \
+exploitation indicated (signs that what came down ran or worked), \
+post-compromise (ongoing control, or data leaving the host).
+- Say what the host is and what would be at stake if it were compromised.
+- Compare the flagged contact with the host's normal traffic or with the \
+indicator's other campus visitors, using figures from the case file or a \
+query (e.g. "larger than 71% of visitors").
+- Refer to figures and tables by number: name a chart inside a sentence with \
+its marker ("as [[chart host_load]] shows" reads "as Figure 2 shows"), and cite \
+flow rows as [[flow F3]] (they point to the flow table).
 
 Rules for the report text:
 - Every number must appear in the case file or a tool result (the ready-made \
@@ -426,6 +458,7 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
     flows = _safe("indicator_flows", tools.indicator_flows, host, ip_list, window, case_rows, own_name)
     names = _safe("indicator_names", tools.indicator_names, host, ip_list, window, case_rows, own_name)
     expected = tools.expected_behaviour(identity, server_ips, flows)
+    public_intel = _safe("web_context", web_context.lookup, identity)
     held = (flows.get("classification") or {}).get("held_open") or {}
     load = _safe("host_load_baseline", tools.host_load_baseline, host, identity)
     other_traffic = _safe("host_other_traffic", tools.host_other_traffic, host, window, ip_list, own_name,
@@ -477,6 +510,7 @@ def gather_evidence(identity: dict, case_rows: list[dict], asset_index: dict[str
         "dns": dns,
         "load": load,
         "expected": expected,
+        "web_context": public_intel,
         "other_traffic": other_traffic,
         "host_type": host_kind,
         "peers": peers,
@@ -533,13 +567,18 @@ def reconcile_verdict(parsed: dict, baseline: dict) -> dict:
                      f"({baseline.get('reason', '').rstrip('.')}), where this report concludes "
                      f"{VERDICT_LABEL.get(model_verdict)}. Weigh both before acting.")
         escalating = SEVERITY.get(model_verdict, 1) > SEVERITY.get(baseline["verdict"], 1)
-        if escalating and _cites_threatfox_confidence(parsed.get("REPORT", "") + " " + parsed.get("HEADLINE", "")):
-            notes.append("The report mentions ThreatFox confidence, which rates the indicator, not this host.")
+        if escalating and _cites_source_confidence(parsed.get("REPORT", "") + " " + parsed.get("HEADLINE", "")):
+            notes.append("The report mentions the source's confidence, which rates the indicator, not this host.")
     return {**parsed, "verdict_notes": notes}
 
 
-def _cites_threatfox_confidence(text: str) -> bool:
-    return any(re.search(r"(?i)threatfox", s) and re.search(r"(?i)confidence", s) for s in _sentences(text))
+SOURCE_WORDS_RE = re.compile(r"(?i)threatfox|\bmisp\b|\bfeed\b|reporter|listing|source'?s? confidence|"
+                             r"(indicator'?s?|intel(ligence)?|threat[- ]intel(ligence)?) source")
+
+
+def _cites_source_confidence(text: str) -> bool:
+    """A sentence that leans on the indicator source's confidence rating."""
+    return any(SOURCE_WORDS_RE.search(s) and re.search(r"(?i)confidence", s) for s in _sentences(text))
 
 
 DOES_NOT_FIT_RE = re.compile(r"(?i)\b(does not|doesn't|do not|don't|not)\s+(match|fit|consistent|align)|inconsistent with|unlike")
@@ -704,6 +743,7 @@ def assess_evidence(identity: dict, ev: dict) -> dict:
     (eval re-runs this to check that identical evidence gives an identical
     verdict). Every case, including one with no traffic, is written by the
     model."""
+    llm_client.reset_usage()
     case_file = casefile.build_case_file(ev)           # full, for reviewers and the number check
     blind_file = casefile.build_case_file(ev, blind=True)  # what the model reads: evidence, no rules' result
     ip_list = [entry["server_ip"] for entry in ev["server_ips"].get("ips", [])]
@@ -721,6 +761,7 @@ def assess_evidence(identity: dict, ev: dict) -> dict:
     result = finish_result(identity, ev, case_file, reply_text, tool_trace, charts)
     result["refinement"] = refinement
     result["prompt_tokens"] = llm_client.max_prompt_tokens
+    result["usage"] = llm_client.usage_snapshot()
     if config.PROVIDER == "ollama" and llm_client.max_prompt_tokens >= CONTEXT_WARN_SHARE * config.OLLAMA_NUM_CTX:
         result["consistency_flags"].append(
             f"The prompt reached {llm_client.max_prompt_tokens:,} of {config.OLLAMA_NUM_CTX:,} context tokens; "
@@ -743,7 +784,7 @@ reads as your own reasoning about this case, not a list of fields.
 tool that exposes the host).
 5. The host's role rests on its uptime and other traffic, is labelled as a reading of the evidence, and \
 does not guess the host's location or network.
-6. It does not rely on ThreatFox confidence: that rates the indicator, not this host.
+6. It does not rely on the source's confidence: that rates the indicator, not this host.
 7. It places 1-3 charts, each on its own line ([[chart name]] from READY-MADE CHARTS, or [[chart N]] for \
 one you made) next to the text that explains it.
 8. It has the four parts in order (Executive summary, Background, Analysis, Conclusion and next steps), \
@@ -759,6 +800,7 @@ You may use the tools again, for example to check a number or fix a chart. Then 
 answer in the same format: the header lines, FLOW_NOTES, REPORT:, and the four parts. If it already holds up, \
 repeat it unchanged."""
 
+MAX_REPORT_WORDS = 750  # well over this does not fit the PDF's one-page body
 EXPOSURE_WORDS_RE = re.compile(r"(?i)expos|firewall|tunnel|remote|inbound|reach")
 NEXT_STEPS_RE = re.compile(r"(?i)next step|recommend|action")
 SQL_IN_TEXT_RE = re.compile(r"(?is)\bselect\b.{1,300}\bfrom\b\s+[\w.]+")
@@ -793,8 +835,8 @@ def self_check_problems(parsed: dict, ev: dict, evidence_text: str, charts: list
     shared = next((s for s in ev.get("signals", []) if s["name"] == "shared_infrastructure"), None)
     if shared and shared["direction"] == signals.AGAINST and NOT_SHARED_RE.search(report_text):
         problems.append(f"The report says the IP is not shared, but the case file shows it is: {shared['reason']}")
-    if verdict in ("SUSPICIOUS", "LIKELY_THREAT") and _cites_threatfox_confidence(report_text):
-        problems.append("The report brings up ThreatFox confidence: make sure it is not part of the reasoning, "
+    if verdict in ("SUSPICIOUS", "LIKELY_THREAT") and _cites_source_confidence(report_text):
+        problems.append("The report brings up the source's confidence: make sure it is not part of the reasoning, "
                         "as it rates the indicator, not this host.")
     service = ev.get("expected", {}).get("service")
     remote = (ev.get("app_context") or {}).get("remote_access_app")
@@ -808,6 +850,10 @@ def self_check_problems(parsed: dict, ev: dict, evidence_text: str, charts: list
     conclusion = sections.get("conclusion", "")
     if full_text and not (re.search(r"(?m)^\s*(\d+[.)]|[-*])\s", conclusion) or NEXT_STEPS_RE.search(conclusion)):
         problems.append("The Conclusion and next steps part has no next steps.")
+    words = len(re.findall(r"\w+", mdrender.CHART_ANYWHERE_RE.sub("", full_text)))
+    if words > MAX_REPORT_WORDS:
+        problems.append(f"The report is {words} words; keep the four parts to about 450 words so they fit on one "
+                        "page. Cut repetition and detail the figures and flow table already carry.")
     problems += _chart_problems(full_text, charts or [], ev.get("chart_options") or [])
     problems += _structure_problems(sections, full_text, has_traffic=not _no_traffic(ev))
     problems += flow_problems(parsed, ev)
@@ -1023,13 +1069,13 @@ def _error_result(identity: dict, exc: Exception) -> dict:
 
 def load_cases(input_path: Path) -> tuple[list[tuple[dict, list[dict]]], dict[str, list[dict]], int]:
     """(cases, asset_index, raw match count): one (identity, rows) per
-    (indicator, host), highest ThreatFox confidence and most matches first."""
+    (indicator, host), highest source confidence (none counts as 0) and most matches first."""
     matches = evidence.load_matches(input_path)
     ioc_metadata = evidence.load_ioc_metadata()
     groups = evidence.group_matches(matches)
     asset_index = evidence.asset_ioc_index(matches)
     cases = [(evidence.case_identity(key, rows, ioc_metadata), rows) for key, rows in groups.items()]
-    cases.sort(key=lambda c: (-(c[0]["threatfox_confidence"] or 0), -c[0]["n_events"]))
+    cases.sort(key=lambda c: (-(c[0].get("intel_confidence") or 0), -c[0]["n_events"]))
     return cases, asset_index, len(matches)
 
 
@@ -1047,6 +1093,61 @@ def feed_path(positional: Path | None, option: Path | None) -> Path:
     return next((p for p in DEFAULT_FEEDS if p.exists()), DEFAULT_FEEDS[0])
 
 
+USAGE_KEYS = ("calls", "prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd")
+
+
+def read_results(path: Path) -> list[dict]:
+    """The results in an assessments.json: {"usage", "results"}, or a plain
+    list (files written before usage totals were added)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data["results"] if isinstance(data, dict) else data
+
+
+def usage_totals(results: list[dict]) -> dict:
+    """Model calls, tokens and estimated cost over every result that has them."""
+    totals = {key: 0 for key in USAGE_KEYS}
+    for r in results:
+        for key in USAGE_KEYS:
+            totals[key] += (r.get("usage") or {}).get(key) or 0
+    totals["cost_usd"] = round(totals["cost_usd"], 6)
+    totals["cases"] = len(results)
+    return totals
+
+
+def over_budget(spent: float) -> bool:
+    return config.MAX_RUN_COST_USD is not None and spent >= config.MAX_RUN_COST_USD
+
+
+def usage_line(used: dict, run_cost: float) -> str:
+    line = (f"tokens: {used['prompt_tokens']:,} in ({used['cached_tokens']:,} cached), "
+            f"{used['completion_tokens']:,} out, {used['calls']} call(s)")
+    if used["cost_usd"] or run_cost:
+        line += f"; cost ${used['cost_usd']:.4f}, run ${run_cost:.4f}"
+    return line
+
+
+def write_pdf(result: dict, cases_dir: Path) -> Path | None:
+    """The case's LaTeX report and chart PDFs, compiled if a TeX engine is
+    installed. A failure here never fails the case."""
+    try:
+        tex = latex.write_case_tex(result, cases_dir)
+    except Exception as exc:  # noqa: BLE001 - the HTML and Markdown reports are already written
+        print(f"  warning: LaTeX report not written: {exc}")
+        return None
+    pdf = latex.compile_tex(tex)
+    if pdf:
+        print(f"  PDF: {pdf}")
+    return pdf
+
+
+def write_summary_pdf(results: list[dict], output_dir: Path) -> Path | None:
+    tex = output_dir / "summary.tex"
+    tex.write_text(latex.render_latex_summary([r for r in results if r.get("VERDICT") != "ERROR"]), encoding="utf-8")
+    pdf = latex.compile_tex(tex)
+    print(f"Wrote the batch summary to {pdf or tex}")
+    return pdf
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Investigate IOC matches with flow data and an LLM agent.")
     parser.add_argument("feed", type=Path, nargs="?", default=None,
@@ -1061,6 +1162,9 @@ def main() -> None:
                         help="seconds to wait between cases (for rate-limited providers)")
     parser.add_argument("--resume", action="store_true",
                         help="keep cases that already succeeded in the output and only assess the rest")
+    parser.add_argument("--pdf", action="store_true",
+                        help="also write LaTeX reports (output/cases/*.tex, summary.tex) and compile them to PDF "
+                             "with latexmk or tectonic")
     args = parser.parse_args()
     args.input = feed_path(args.feed, args.input)
 
@@ -1088,7 +1192,7 @@ def main() -> None:
 
     results = []
     if args.resume and assessments_path.exists():
-        previous = json.loads(assessments_path.read_text())
+        previous = read_results(assessments_path)
         done_keys = set()
         for r in previous:
             if r.get("VERDICT") != "ERROR":
@@ -1105,11 +1209,18 @@ def main() -> None:
 
     def flush() -> None:
         # Write after every case so an error or Ctrl-C keeps what already finished.
-        assessments_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
+        saved = {"usage": usage_totals(results), "results": results}
+        assessments_path.write_text(json.dumps(saved, indent=2, default=str), encoding="utf-8")
         report_path.write_text(report.render(results), encoding="utf-8")
 
+    run_cost = 0.0
     for i, (identity, case_rows) in enumerate(cases):
+        if over_budget(run_cost):
+            print(f"\nEstimated spend ${run_cost:.2f} reached MAX_RUN_COST_USD (${config.MAX_RUN_COST_USD:.2f}). "
+                  f"Stopping after {i} case(s); raise the limit and run again with --resume.")
+            break
         print(f"\n[{i + 1}/{len(cases)}] {identity['indicator']} <-> {identity['affected_asset']}")
+        llm_client.reset_usage()
         try:
             key = (identity["indicator"], identity["affected_asset"])
             result = assess_case(identity, case_rows, asset_index, links, link_checks, also_matched.get(key))
@@ -1119,18 +1230,25 @@ def main() -> None:
             print(f"  verdict={result['VERDICT']} (rule-based cross-check: {result['baseline_verdict']}) "
                   f"confidence={result['CONFIDENCE']}{tool_note}{charts_note}{review}")
             report.write_case_files(result, cases_dir)
+            if args.pdf:
+                write_pdf(result, cases_dir)
         except llm_client.DailyQuotaExceeded as exc:
-            print(f"\n{exc}\nStopping after {i} case(s). Run again with --resume after the reset.")
+            print(f"\n{exc}\nStopping after {i} case(s). Run again with --resume once that is fixed.")
             break
         except Exception as exc:  # noqa: BLE001 - one bad case shouldn't stop the batch
             print(f"  FAILED: {exc}")
             result = _error_result(identity, exc)
+        result["usage"] = llm_client.usage_snapshot()
+        run_cost += result["usage"]["cost_usd"]
+        print(f"  {usage_line(result['usage'], run_cost)}")
         results.append(result)
         flush()
         if i < len(cases) - 1:
             time.sleep(args.pause)
 
     flush()
+    if args.pdf and results:
+        write_summary_pdf(results, args.output_dir)
     print(f"\nWrote {len(results)} assessment(s) to {assessments_path}")
     print(f"Wrote report to {report_path} and per-case Markdown to {cases_dir}/")
 

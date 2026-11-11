@@ -1,0 +1,10 @@
+# The stand demo must work with no network: only this machine can open it,
+# no usage statistics, no browser auto-open. Static serving lets "Open PDF"
+# show a report in its own tab (dashboard/static/, filled by the app).
+[server]
+address = "localhost"
+headless = true
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
