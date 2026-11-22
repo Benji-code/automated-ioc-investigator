@@ -78,19 +78,15 @@ flowchart LR
     c1 -- no --> review["Report marked for<br/>analyst review"]
     c2 -- no --> review
 
-    done -. "taken forward" .-> deep["Deep-dive investigation<br/>(agent)"]
-    review -. "taken forward" .-> deep
-    deep --> final["Final incident report<br/>(LaTeX/PDF)"]
-
     classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
     classDef model fill:#fff4d6,stroke:#c98a00,color:#111
     classDef io fill:#f2f2f2,stroke:#777,color:#111
     classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
     classDef warn fill:#fdecea,stroke:#c0392b,color:#111
     class g1,g2,g3,g4,g5,c1,c2,rules code
-    class m1,m2,m3,deep model
+    class m1,m2,m3 model
     class feed,cases io
-    class done,final good
+    class done good
     class review warn
     style gather fill:none,stroke:#3b6fd4
     style investigate fill:none,stroke:#c98a00
@@ -116,14 +112,6 @@ for the final check.
 | 10 | Investigate: read the evidence, run follow-up queries, pick charts, write the report and a verdict | Agent | `assess.py`, `tools.py`, `charts.py` |
 | 11 | Check the report against the evidence and the baseline; send problems back for revision, then flag anything that still fails | Code | `assess.py` |
 | 12 | Write the HTML, Markdown and PDF reports | Code | `report.py`, `latex.py` |
-| 13 | For cases taken forward: follow-up queries against SuperNetFlow and the team's case database (daily host history, campus percentiles, IOC match records), cross-checks with teammates' findings, a narrative agreed with the team, and a final LaTeX/PDF incident report with figures | Agent, with analyst review | outside this repo |
-
-The agent does triage at scale: it gives every match a first assessment, so
-the team only looks closely at the cases that matter. Cases taken forward get a
-second, deeper agent pass, reviewed by an analyst, and the reports that go to
-the supervisor are finished there. The same deep-dive can also run a
-campus-wide hunt for an exploit's traffic shape when a CVE is disclosed (for
-example, request-heavy uploads to web servers), not only follow up IOC matches.
 
 ## Architecture
 
