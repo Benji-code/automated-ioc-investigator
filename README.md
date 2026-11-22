@@ -130,7 +130,10 @@ flowchart TB
 
     subgraph feed["Threat feed"]
         direction TB
-        tf["Local MISP in Docker<br/>public threat feeds<br/>+ manual indicators"] --> match["Matched against<br/>campus traffic"]
+        pf["Public feeds<br/>Threatview.io, PhishTank,<br/>honeypot URLs, ..."] --> tf["Local MISP<br/>in Docker"]
+        tfapi["ThreatFox API<br/>sync_threatfox.py"] --> tf
+        tf --> match["Matched against<br/>campus traffic"]
+        man["Manual indicators<br/>and threat description"] --> match
     end
 
     pub["Public threat context<br/>Malpedia, ThreatFox, web search"]
@@ -158,7 +161,7 @@ flowchart TB
     classDef good fill:#e6f4ea,stroke:#2e7d4f,color:#111
     class rf,prof,kb,ev,fc,tf,match code
     class llm model
-    class db,rep,pub data
+    class db,rep,pub,pf,tfapi,man data
     class analyst good
     style hc fill:none,stroke:#3b6fd4
     style feed fill:none,stroke:#3b6fd4
