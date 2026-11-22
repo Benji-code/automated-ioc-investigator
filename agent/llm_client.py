@@ -46,7 +46,8 @@ class OutOfCredit(DailyQuotaExceeded):
 # Token use since the last reset_usage() (assess.py resets it per case).
 # Ollama reports prompt_eval_count / eval_count; OpenRouter a `usage` block,
 # with the actual cost when usage accounting is on.
-usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0}
+usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "web_searches": 0,
+         "cost_usd": 0.0}
 
 
 def reset_usage() -> None:
@@ -58,24 +59,33 @@ def usage_snapshot() -> dict:
     return {**usage, "cost_usd": round(usage["cost_usd"], 6)}
 
 
-def estimate_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """USD from the per-million-token prices in config (0 for a local model)."""
-    return (prompt_tokens * config.PRICE_INPUT_PER_MTOK + completion_tokens * config.PRICE_OUTPUT_PER_MTOK) / 1e6
+def estimate_cost(prompt_tokens: int, completion_tokens: int, web_searches: int = 0) -> float:
+    """USD from the prices in config (0 for a local model)."""
+    if config.PROVIDER == "ollama":
+        return 0.0
+    return ((prompt_tokens * config.PRICE_INPUT_PER_MTOK + completion_tokens * config.PRICE_OUTPUT_PER_MTOK) / 1e6
+            + web_searches * config.PRICE_PER_WEB_SEARCH)
 
 
-def _add_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0, cost: float | None = None) -> None:
+def _add_usage(prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0, cost: float | None = None,
+               web_searches: int = 0) -> None:
     usage["calls"] += 1
     usage["prompt_tokens"] += int(prompt_tokens or 0)
     usage["completion_tokens"] += int(completion_tokens or 0)
     usage["cached_tokens"] += int(cached_tokens or 0)
-    usage["cost_usd"] += float(cost) if cost is not None else estimate_cost(prompt_tokens or 0, completion_tokens or 0)
+    usage["web_searches"] += int(web_searches or 0)
+    usage["cost_usd"] += (float(cost) if cost is not None
+                          else estimate_cost(prompt_tokens or 0, completion_tokens or 0, web_searches or 0))
 
 
 def _record_openrouter_usage(data: dict) -> None:
+    """OpenRouter's usage block: tokens, cached tokens, web searches (server
+    tool) and the call's actual cost, searches included."""
     block = data.get("usage") or {}
     details = block.get("prompt_tokens_details") or {}
+    searches = (block.get("server_tool_use_details") or {}).get("web_search_requests") or 0
     _add_usage(block.get("prompt_tokens") or 0, block.get("completion_tokens") or 0,
-               details.get("cached_tokens") or 0, block.get("cost"))
+               details.get("cached_tokens") or 0, block.get("cost"), searches)
 
 
 CREDIT_WORDS = ("credit", "insufficient", "limit exceeded", "key limit", "spend limit")
@@ -185,11 +195,10 @@ def _call_once(messages: list[dict], tools: list[dict] | None, model: str | None
         return _call_ollama(messages, tools, model, temperature, max_tokens)
 
     model = model or config.model()
-    payload = {
+    payload = {  # no Ollama settings (num_ctx, think, seed): OpenRouter's models do not take them
         "model": model,
         "temperature": config.TEMPERATURE if temperature is None else temperature,
         "max_tokens": max_tokens,
-        "seed": config.SEED,
         "messages": _cached(messages) if _use_cache(model) else messages,
         "usage": {"include": True},  # OpenRouter usage accounting: the actual cost of each call
     }

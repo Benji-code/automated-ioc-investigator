@@ -22,7 +22,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import analysis, casefile, charts as chart_tools, config, correlation, evidence, host_type, mdrender, tools
+from . import analysis, casefile, charts as chart_tools, config, correlation, evidence, host_type, labels, mdrender, tools
 
 VERDICT_ORDER = {"LIKELY_THREAT": 0, "SUSPICIOUS": 1, "LIKELY_FALSE_POSITIVE": 2, "INSUFFICIENT_DATA": 3}
 VERDICT_STYLE = {  # css class, label
@@ -75,7 +75,7 @@ def _role(result: dict) -> str:
         return ""
     if re.match(r"(?i)^\W*(unclear|unknown|not clear|cannot tell|n/?a|none)\b", role):
         return ""
-    return "" if host_type.role_problem(role, ev) else role
+    return "" if host_type.role_problem(role, ev) else labels.plain_labels(role)
 
 
 def _user(result: dict) -> str:
@@ -87,12 +87,14 @@ def _user(result: dict) -> str:
         return ""
     kind = host_type.user_type(text)
     reason = re.sub(r"^\W*\w+\W*", "", text, count=1).strip()
-    return kind.capitalize() + (f": {reason}" if reason else "")
+    return kind.capitalize() + (f": {labels.plain_labels(reason)}" if reason else "")
 
 
 def _parts(result: dict) -> dict[str, str]:
-    """The report's four parts, as the model wrote them."""
-    return result.get("SECTIONS") or mdrender.split_sections(result.get("REPORT") or "")
+    """The report's four parts, as the model wrote them (known code labels
+    swapped for plain words, the only change made to the text)."""
+    sections = result.get("SECTIONS") or mdrender.split_sections(result.get("REPORT") or "")
+    return {key: labels.plain_labels(text) for key, text in sections.items()}
 
 
 def _figure_numbers(result: dict) -> dict[str, tuple[dict, int]]:
@@ -116,7 +118,8 @@ def render_markdown(result: dict) -> str:
     check = _cross_check(result)
     if check:
         meta += f" · {check}"
-    out = [title, "", meta, ""]
+    host = ((result.get("evidence") or {}).get("host") or {}).get("hostname")
+    out = [title, "", f"**Campus host:** {result['affected_asset']}" + (f" ({host})" if host else ""), "", meta, ""]
     if _user(result):
         out += [f"**Likely user (from its activity):** {_user(result)}", ""]
     if result.get("needs_review"):
@@ -257,7 +260,7 @@ def flow_rows(result: dict) -> list[dict]:
                      "time": _flow_time(row), "clock": _flow_time(row, with_date=False), "duration": _duration(row),
                      "from": result["affected_asset"], "to": to,
                      "up": analysis.fmt_bytes(row["up_bytes"]), "down": analysis.fmt_bytes(row["down_bytes"]),
-                     "remote": row["remote"], "likely": notes.get(row["id"], "")})
+                     "remote": row["remote"], "likely": labels.plain_labels(notes.get(row["id"], ""))})
     return rows
 
 
@@ -362,13 +365,14 @@ def fact_rows(result: dict) -> list[tuple[str, str]]:
     """(label, value) facts about the case, for the facts box and the PDF's facts table."""
     ev = result.get("evidence") or {}
     host = ev.get("host") or {}
-    malware = " / ".join(x for x in (result.get("malware"), result.get("threat_type")) if x) or "?"
+    threat_type = labels.THREAT_TYPES.get(result.get("threat_type") or "", result.get("threat_type"))
+    malware = " / ".join(x for x in (result.get("malware"), threat_type) if x) or "?"
     ips = []
     for info in ev.get("asn") or []:
         org = (info.get("asn_org") or "").strip()
         ips.append(f"{info['server_ip']}" + (f" (AS{info['asn']} {org})" if info.get("asn") else ""))
     rows = [
-        ("Internal host", f"{result['affected_asset']}" + (f" ({host['hostname']})" if host.get("hostname") else "")),
+        ("Campus host", f"{result['affected_asset']}" + (f" ({host['hostname']})" if host.get("hostname") else "")),
         ("Indicator", f"{result['indicator']} ({result.get('indicator_type') or '?'})"),
         ("Indicator source", f"{evidence.source_name(result)}: {malware}; source confidence "
                              f"{evidence.confidence_text(result)}"),
@@ -380,8 +384,11 @@ def fact_rows(result: dict) -> list[tuple[str, str]]:
     kind = ev.get("host_type") or {}
     if kind.get("label"):
         unusual = len((kind.get("comparison") or {}).get("unusual") or [])
-        rows.append(("Host type (classified)", f"{kind['name']}, confidence {kind['confidence']:.2f}; "
-                     + (f"{unusual} feature(s) unusual for the type" if unusual else "behaves like the type")))
+        if labels.host_type_uncertain(kind):
+            rows.append(("Host type (classified)", labels.host_type_text(kind)))
+        else:
+            rows.append(("Host type (classified)", f"{kind['name']}, confidence {kind['confidence']:.2f}; "
+                         + (f"{unusual} feature(s) unusual for the type" if unusual else "behaves like the type")))
     role = _role(result)
     if role:
         rows.append(("Likely role (analyst reading)", role))
@@ -489,7 +496,7 @@ def _case(result: dict, number: int, total: int) -> str:
   <header class="case-head">
     <div class="kicker">Case {number} of {total}</div>
     <h2 class="case-title mono">{e(result['indicator'])}</h2>
-    <p class="case-sub">contacted by <span class="mono">{e(result['affected_asset'])}</span>{_hostname(result)}</p>
+    <p class="case-sub">Campus host: <span class="mono">{e(result['affected_asset'])}</span>{_hostname(result)}</p>
     <div class="pills">{''.join(pills)}</div>
   </header>
   {_facts(result)}
@@ -510,7 +517,7 @@ def _case(result: dict, number: int, total: int) -> str:
 
 def _index_row(result: dict) -> str:
     verdict = result.get("VERDICT", "SUSPICIOUS")
-    headline = (result.get("HEADLINE") or _parts(result).get("summary") or "").strip()
+    headline = labels.plain_labels((result.get("HEADLINE") or _parts(result).get("summary") or "").strip())
     if len(headline) > 220:
         headline = headline[:219].rsplit(" ", 1)[0] + "…"
     review = "<span class='pill review'>Review</span>" if result.get("needs_review") else ""
@@ -520,6 +527,17 @@ def _index_row(result: dict) -> str:
             f"<td><a class='mono' href='#{_anchor(result)}'>{e(result['indicator'])}</a>"
             f"<div class='mono muted small'>{e(result['affected_asset'])}</div></td>"
             f"<td class='small'>{e(category)}</td><td class='small'>{e(headline)}</td><td>{review}</td></tr>")
+
+
+def _usage_note(results: list[dict]) -> str:
+    """' · 412,000 tokens, 3 web searches, $0.0312' over the cases (empty for a free local model)."""
+    tokens = sum(((r.get("usage") or {}).get("prompt_tokens") or 0) + ((r.get("usage") or {}).get("completion_tokens") or 0)
+                 for r in results)
+    searches = sum((r.get("usage") or {}).get("web_searches") or 0 for r in results)
+    cost = sum((r.get("usage") or {}).get("cost_usd") or 0 for r in results)
+    if not cost:
+        return ""
+    return f" · {tokens:,} tokens, {searches} web search(es), ${cost:.4f}"
 
 
 def render(results: list[dict]) -> str:
@@ -559,7 +577,7 @@ def render(results: list[dict]) -> str:
     <div>
       <div class="eyebrow">{org + ' · ' if org else ''}Security operations</div>
       <h1>{TITLE}</h1>
-      <p class="sub">Threat-intelligence indicator matches investigated against SuperNetFlow flow records · generated {generated}</p>
+      <p class="sub">Threat-intelligence indicator matches investigated against SuperNetFlow flow records · generated {generated}{e(_usage_note(results))}</p>
     </div>
     <div class="marking">Sensitive · internal use only</div>
   </div>

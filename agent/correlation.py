@@ -13,12 +13,19 @@ runs before any case is assessed and needs no database.
 """
 from __future__ import annotations
 
+from . import config
 from . import domain_features as dfeat
+
+
+def _campus(domain: str) -> bool:
+    return any(domain == d or domain.endswith("." + d) for d in config.CAMPUS_DOMAINS)
 
 
 def _case_domains(rows: list[dict]) -> set[str]:
     """Registered domains the feed recorded for one case (SNI, DNS, root
-    domain), without the ECH placeholder."""
+    domain), without the ECH placeholder or the site's own domains: a campus
+    name on the rows is the campus host's own service being reached, which
+    many unrelated inbound cases share."""
     domains: set[str] = set()
     for record in rows:
         for a in record.get("evidence", {}).get("subscriber_activity", []):
@@ -27,7 +34,7 @@ def _case_domains(rows: list[dict]) -> set[str]:
                 if not name:
                     continue
                 domain = dfeat.registered_domain(name)
-                if domain and not dfeat.is_ech_placeholder(domain):
+                if domain and not dfeat.is_ech_placeholder(domain) and not _campus(domain):
                     domains.add(domain)
     return domains
 

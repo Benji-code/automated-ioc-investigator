@@ -3,18 +3,21 @@
     python -m demo.anonymise output/assessments.json            # -> demo/bundle/ (gitignored)
     python -m demo.anonymise output/assessments.json --no-pdf   # skip compiling the PDFs
 
-Everything shown at the stand goes through Anonymiser first:
+Everything shown at the stand goes through Anonymiser first. Only campus
+data is replaced:
   - campus IPs (CAMPUS_CIDR in .env, comma-separated) -> stable labels: Host A, Host B, ...
-  - each case host's name (reverse DNS) -> its role label, e.g. "campus web proxy";
-    any other name under CAMPUS_DOMAINS -> "campus host name"
-  - names of sites the host visited -> their kind and a number, e.g. "adult content site 2",
-    so the story survives but the browsing does not
-  - public indicators, ad networks and well-known service domains stay as they are
+  - each case host's name (reverse DNS) -> its role label, e.g. "campus web proxy", or
+    "campus host" when its type is unclear
+  - any other name under CAMPUS_DOMAINS, or served from a campus address -> "campus site A",
+    "campus site B", ... (stable across the bundle)
+  - public third-party domains (Google, Microsoft, ad networks, the indicator itself, the
+    sites a host visited) stay as they are: without the host's identity they are not personal
   - the raw case file, the queries run, the model's raw reply and subscriber IDs are dropped
 Case text, charts, flow tables and the facts all live in the result dict, so
 anonymising the dict and rendering from it covers the HTML and the PDF alike.
-The bundle is results.json, one PDF per case (compiled from the anonymised
-results with tectonic or latexmk) and intel.json, a snapshot of the latest
+The bundle is results.json, one PDF per case in pdf/ (compiled from the
+anonymised results with tectonic or latexmk; the real, non-anonymised PDFs
+are in output/reports/ and never copied here) and intel.json, a snapshot of the latest
 public threat intel for the Threat board.
 """
 from __future__ import annotations
@@ -26,7 +29,7 @@ import json
 import re
 from pathlib import Path
 
-from agent import config, domain_features, knowledge
+from agent import config, domain_features, labels
 from demo import latest_intel
 
 HERE = Path(__file__).resolve().parent
@@ -36,7 +39,9 @@ DROPPED_FIELDS = ("case_file", "tool_calls", "model_reply_raw", "match_ids", "re
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d])")
 DOMAIN_RE = re.compile(r"(?i)(?<![\w@-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62})(?![\w-])")
 READ_FIRST = ("HEADLINE", "SECTIONS", "LIKELY_USER", "HOST_ROLE", "FLOW_NOTES")
-KEEP_ALWAYS = ("cloudflare-ech.com",)  # the Encrypted Client Hello placeholder, not a site
+# Keys whose values name the server at a dict's server_ip / ip.
+SERVER_NAME_KEYS = ("sni", "dns", "root_domain", "name", "names", "remote", "domain", "sni_name", "dns_name",
+                    "hostname", "registered_domains")
 
 
 def _networks(cidrs) -> list:
@@ -45,14 +50,14 @@ def _networks(cidrs) -> list:
     return [ipaddress.ip_network(c.strip(), strict=False) for c in cidrs if c and c.strip()]
 
 
-def _public_domains() -> set[str]:
-    """Shared, public infrastructure that is not personal browsing."""
-    keep = set(KEEP_ALWAYS) | set(knowledge.AD_NETWORK_DOMAINS)
-    for profile in knowledge.SERVICE_PROFILES.values():
-        keep |= set(profile.get("domains") or [])
-    for markers in knowledge.PLATFORM_HINT_DOMAINS.values():
-        keep |= set(markers)
-    return keep
+def _letters(n: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA."""
+    text = ""
+    n += 1
+    while n:
+        n, rest = divmod(n - 1, 26)
+        text = chr(ord("A") + rest) + text
+    return text
 
 
 class Anonymiser:
@@ -61,11 +66,11 @@ class Anonymiser:
     def __init__(self, campus_cidrs=None, campus_domains=None, keep_domains=()):
         self.networks = _networks(config.CAMPUS_CIDR if campus_cidrs is None else campus_cidrs)
         self.campus_domains = [d.lower() for d in (config.CAMPUS_DOMAINS if campus_domains is None else campus_domains)]
-        self.keep = _public_domains() | {d.lower() for d in keep_domains}
+        self.keep = {d.lower() for d in keep_domains}  # the indicators: public, even under a campus domain
         self.hosts: dict[str, str] = {}
-        self.names: dict[str, str] = {}
-        self.sites: dict[str, str] = {}
-        self.site_counts: dict[str, int] = {}
+        self.names: dict[str, str] = {}         # case hosts' own names -> role labels
+        self.served: set[str] = set()           # names seen on a campus address
+        self.sites: dict[str, str] = {}         # campus names -> "campus site A", ...
 
     # --- single values -----------------------------------------------------------------
 
@@ -86,30 +91,40 @@ class Anonymiser:
         name = name.lower().rstrip(".")
         return any(name == d or name.endswith("." + d) for d in self.campus_domains)
 
-    def _kept(self, name: str) -> bool:
-        name = name.lower()
-        return any(name == k or name.endswith("." + k) or k.endswith("." + name) for k in self.keep)
-
-    def site_label(self, name: str) -> str:
-        """A visited site -> "<kind> site N", the same label for its subdomains."""
-        root = domain_features.registered_domain(name)
-        if root not in self.sites:
-            kind = knowledge.destination_kind(root) or "web"
-            self.site_counts[kind] = self.site_counts.get(kind, 0) + 1
-            self.sites[root] = f"{kind} site {self.site_counts[kind]}"
-        return self.sites[root]
+    def campus_site(self, name: str) -> str:
+        """A campus name -> "campus site A", the same label wherever it appears."""
+        if name not in self.sites:
+            self.sites[name] = f"campus site {_letters(len(self.sites))}"
+        return self.sites[name]
 
     def _domain(self, match: re.Match) -> str:
         name = match.group(1)
         lowered = name.lower().rstrip(".")
         if lowered in self.names:
             return self.names[lowered]
-        if self.is_campus_name(lowered):
-            return "campus host name"
-        parts = domain_features._extractor()(lowered)
-        if not (parts.domain and parts.suffix) or self._kept(lowered):
-            return name  # not a real domain (a file name, say), or public infrastructure
-        return self.site_label(lowered)
+        if lowered in self.keep:
+            return name
+        if self.is_campus_name(lowered) or lowered in self.served:
+            return self.campus_site(lowered)
+        return name  # public: a third-party site, an ad network, a service
+
+    def learn_served(self, value) -> None:
+        """Names on a campus server address (a dict whose server_ip or ip is a
+        campus IP): campus sites, even under a public domain."""
+        if isinstance(value, list):
+            for item in value:
+                self.learn_served(item)
+            return
+        if not isinstance(value, dict):
+            return
+        address = str(value.get("server_ip") or value.get("ip") or "")
+        if address and self.is_campus_ip(address) and address != str(value.get("client_ip") or ""):
+            for key in SERVER_NAME_KEYS:
+                for found in DOMAIN_RE.findall(json.dumps(value.get(key) or "")):
+                    if not self.is_campus_name(found) and domain_features._extractor()(found.lower()).suffix:
+                        self.served.add(found.lower().rstrip("."))
+        for item in value.values():
+            self.learn_served(item)
 
     def text(self, value: str) -> str:
         value = IPV4_RE.sub(lambda m: self.host_label(m.group(1)) if self.is_campus_ip(m.group(1)) else m.group(1),
@@ -132,7 +147,8 @@ class Anonymiser:
         ev = result.get("evidence") or {}
         name = ((ev.get("host") or {}).get("hostname") or "").lower().rstrip(".")
         if name:
-            role = ((ev.get("host_type") or {}).get("name") or "host").split(" (")[0]
+            kind = ev.get("host_type") or {}
+            role = "host" if labels.host_type_uncertain(kind) else labels.host_type_name(kind["label"])
             self.names[name] = f"campus {role}"
 
     def result(self, result: dict) -> dict:
@@ -142,6 +158,7 @@ class Anonymiser:
         if isinstance(host, dict):
             host.pop("subscriber_ids", None)
         self.learn_host(out)
+        self.learn_served(out.get("evidence"))
         for key in READ_FIRST:  # number sites in the order a reader meets them
             self.walk(out.get(key))
         return self.walk(out)
@@ -165,6 +182,7 @@ def anonymise_results(results: list[dict], anonymiser: Anonymiser | None = None)
         anonymiser = Anonymiser(keep_domains=indicator_names(results))
     for r in results:  # names first, so a host's name gets its role label wherever it appears
         anonymiser.learn_host(r)
+        anonymiser.learn_served(r.get("evidence"))
     for r in results:  # then the report text, so sites are numbered in the order a reader meets them
         for key in READ_FIRST:
             anonymiser.walk(r.get(key))
@@ -172,9 +190,10 @@ def anonymise_results(results: list[dict], anonymiser: Anonymiser | None = None)
 
 
 def write_pdfs(results: list[dict], folder: Path) -> int:
-    """Compile each (anonymised) case to folder/pdf/<case>.pdf. The LaTeX and
-    chart files are built in a temporary folder; only the PDFs are kept, and
-    PDFs left from an earlier bundle are removed. Returns how many compiled."""
+    """Compile each (anonymised) case to folder/pdf/<indicator>-<host>.pdf,
+    named as in output/reports/. The LaTeX and chart files are built in a
+    temporary folder; only the PDFs are kept, and PDFs left from an earlier
+    bundle are removed. Returns how many compiled."""
     import shutil
     import tempfile
 
@@ -192,17 +211,22 @@ def write_pdfs(results: list[dict], folder: Path) -> int:
         for r in results:
             pdf = latex.compile_tex(latex.write_case_tex(r, Path(work)))
             if pdf:
-                shutil.copy(pdf, pdf_dir / pdf.name)
+                shutil.copy(pdf, pdf_dir / latex.report_name(r))
                 made += 1
     return made
 
 
-def write_bundle(results: list[dict], folder: Path, pdf: bool = True, intel: dict | None = None) -> Path:
-    """results.json (already anonymised), one PDF per case (pdf=True) and the
-    latest-intel snapshot, if given."""
+def write_bundle(results: list[dict], folder: Path, pdf: bool = True, intel: dict | None = None,
+                 feed: dict | None = None) -> Path:
+    """results.json (already anonymised), one PDF per case (pdf=True), the
+    latest-intel snapshot and the feed build's summary (indicators skipped as
+    known services: public names only), if given."""
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / "results.json"
     path.write_text(json.dumps(results, indent=1, default=str), encoding="utf-8")
+    if feed is not None:
+        (folder / "feed.json").write_text(json.dumps(
+            {"skipped_known_service": list(feed.get("skipped_known_service") or [])}, indent=1), encoding="utf-8")
     if pdf:
         print(f"  {write_pdfs(results, folder)} of {len(results)} PDF(s) compiled")
     if intel is not None:
@@ -235,7 +259,8 @@ def main() -> None:
         intel = latest_intel.fetch_snapshot()
         for error in intel["errors"]:
             print(f"  warning: latest intel: {error}")
-    path = write_bundle(results, args.out, pdf=not args.no_pdf, intel=intel)
+    path = write_bundle(results, args.out, pdf=not args.no_pdf, intel=intel,
+                        feed=assess.read_feed_summary(args.assessments))
     print(f"Wrote {len(results)} anonymised case(s) to {path}")
 
 

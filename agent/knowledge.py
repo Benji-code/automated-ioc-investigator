@@ -63,6 +63,36 @@ THREAT_TYPE_PROFILES: dict[str, dict] = {
             "shape (regular check-ins, a custom protocol on a non-web port)."
         ),
     },
+    "phishing": {
+        "ioc_role": "phishing page",
+        "match_means": "a user on the host visited the listed phishing page (not that the host is infected)",
+        "affected_means": (
+            'For phishing, "affected" means a user visited the page, not that the host is infected: there is '
+            "no malware to beacon or exfiltrate. Read the verdict scale that way: likely threat = a user most "
+            "likely opened the listed page (and may have typed in a password); likely false positive = the "
+            "match is not a visit to that page (a shared address or a link-sharing service where the listed "
+            "name never appears)."
+        ),
+        "victim_traffic": (
+            "a user's browser visiting the phishing host (TLS SNI or HTTP Host equal to the listed host), "
+            "during waking hours, alongside normal browsing; sometimes a small upload after the page loads "
+            "(a submitted form)"
+        ),
+        "expected_traffic_shape": "Short and small: one visit or a few; no beacons, no regular check-ins.",
+        "expected_recurrence": (
+            "One-off. Repeated visits suggest the lure sits in an email or a bookmark the user keeps opening."
+        ),
+        "false_positive_pattern": (
+            "A shared hosting, CDN or big-provider IP where the listed name never appears; link-sharing and "
+            "redirect services (share.google, goo.gl, bit.ly, t.co, Outlook safelinks) that host many URLs, "
+            "only one of which was listed; prefetching of links by mail or chat clients."
+        ),
+        "consequence": "Credential theft (passwords, MFA codes, payment details), not infection of the host.",
+        "next_steps": (
+            "Check whether the user submitted anything (an upload right after the page load). If so, reset "
+            "the password and review the account's MFA and sign-ins; if not, awareness only."
+        ),
+    },
     "c2": {  # some feeds use "c2" instead of "botnet_cc" for the same thing
         "ioc_role": "command-and-control (C2) server",
         "match_means": "the host is infected and being controlled by an attacker",
@@ -540,6 +570,8 @@ USER_EVIDENCE = {
     "student": ("adult content", "gaming", "streaming or social media", "self-hosted media", "study help"),
     "staff": ("work and collaboration",),
 }
+# Personal use that still points to a student when work tools are also used.
+STRONG_STUDENT_USE = ("adult content", "gaming", "study help")
 
 # Well-known ad networks and ad exchanges, including the pop-up and redirect
 # networks common on adult and streaming sites. A flagged domain contacted in
@@ -769,3 +801,22 @@ def app_class(application: str | None, category: str | None, org_label: str = ""
     if kind == "benign":
         return "benign"
     return "vendor"
+
+
+SERVICE_DOMAINS_PATH = Path(__file__).resolve().parent / "data" / "service_domains.txt"
+
+
+@lru_cache(maxsize=1)
+def _service_domains() -> tuple[str, ...]:
+    lines = SERVICE_DOMAINS_PATH.read_text(encoding="utf-8").splitlines()
+    return tuple(line.strip().lower() for line in lines if line.strip() and not line.startswith("#"))
+
+
+def service_domain(host: str | None) -> str | None:
+    """The link-sharing, file-sharing or site-hosting service (from
+    agent/data/service_domains.txt) that this host name belongs to, or None."""
+    host = (host or "").strip().lower().rstrip(".")
+    for domain in _service_domains():
+        if host == domain or host.endswith("." + domain):
+            return domain
+    return None

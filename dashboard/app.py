@@ -36,7 +36,7 @@ import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
-from agent import config, evidence, latex, mdrender, misp_feed, report  # noqa: E402
+from agent import config, evidence, labels, latex, mdrender, misp_feed, report  # noqa: E402
 from demo import anonymise, latest_intel  # noqa: E402
 
 OUTPUT_DIR = ROOT / "output"
@@ -79,8 +79,9 @@ MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 
 def plain(text) -> str:
     """A headline or summary without Markdown marks: no backticks, ** or __,
-    links reduced to their text, chart and flow markers dropped."""
-    text = mdrender.replace_flow_refs(str(text or ""))
+    links reduced to their text, chart and flow markers dropped, known code
+    labels in plain words."""
+    text = mdrender.replace_flow_refs(labels.plain_labels(str(text or "")))
     text = mdrender.CHART_ANYWHERE_RE.sub("", text)
     text = MD_LINK_RE.sub(r"\1", text)
     text = text.replace("`", "").replace("**", "").replace("__", "")
@@ -141,14 +142,37 @@ def _read(path: Path) -> list[dict]:
 def load_cases(live: bool, anonymise_on: bool) -> tuple[list[dict], Path, Path]:
     """(results, the folder holding their PDFs, the folder with an intel snapshot).
     Anonymised: a live run's anonymised results, else the recorded bundle.
-    Real (the default): assess.py's own output and the PDFs it compiled."""
+    Real (the default): assess.py's own output and its finished PDFs (output/reports/)."""
     if anonymise_on:
         if live and (LIVE_BUNDLE / "results.json").exists():
             return _read(LIVE_BUNDLE / "results.json"), LIVE_BUNDLE / "pdf", LIVE_BUNDLE
         results, folder = anonymise.load_bundle()
         return results, folder / "pdf", folder
     source = LIVE_DIR if live else OUTPUT_DIR
-    return _read(source / "assessments.json"), source / "cases", anonymise.load_bundle()[1]
+    return _read(source / "assessments.json"), source / "reports", anonymise.load_bundle()[1]
+
+
+def load_feed_summary(live: bool, anonymise_on: bool, folder: Path) -> dict:
+    """What the feed build skipped (indicators are public names, so the same either way)."""
+    if anonymise_on:
+        try:
+            return json.loads((folder / "feed.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    data_path = (LIVE_DIR if live else OUTPUT_DIR) / "assessments.json"
+    try:
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return (data.get("feed") or {}) if isinstance(data, dict) else {}
+
+
+def skipped_text(feed_summary: dict) -> str:
+    skipped = feed_summary.get("skipped_known_service") or []
+    if not skipped:
+        return ""
+    return (f"{len(skipped)} indicator(s) skipped as known services (bare link-sharing or hosting domains): "
+            + ", ".join(skipped[:8]) + (" ..." if len(skipped) > 8 else ""))
 
 
 def load_snapshot(live: bool, folder: Path) -> dict | None:
@@ -312,7 +336,7 @@ def show_case(result: dict, pdf_dir: Path, anonymise_on: bool) -> None:
     if result.get("sample"):
         st.caption("Illustrative sample case on fake data.")
     stem = latex.stem(result)
-    pdf = pdf_dir / f"{stem}.pdf"
+    pdf = pdf_dir / latex.report_name(result)
     cols = st.columns(4)
     if pdf.exists():
         cols[0].link_button("Open PDF", serve_pdf(pdf, anonymise_on))
@@ -418,13 +442,15 @@ def intel_panel(snapshot: dict | None, live: bool, feeds: set[str]) -> None:
 
 
 def threat_board(results: list[dict], pdf_dir: Path, snapshot: dict | None, live: bool, feeds: set[str],
-                 anonymise_on: bool) -> None:
+                 anonymise_on: bool, feed_summary: dict | None = None) -> None:
     if live:
         live_pull(feeds, anonymise_on)
     if not results:
         st.info("No cases from the ticked feeds. Build a bundle with: python -m demo.anonymise output/assessments.json")
     else:
         board_summary(results)
+    if skipped_text(feed_summary or {}):
+        st.caption(skipped_text(feed_summary or {}))
     left, right = st.columns([3, 2])
     with left:
         st.subheader("Recent cases")
@@ -449,12 +475,13 @@ class Progress:
         self.placeholder.markdown(pipeline_html(step, done), unsafe_allow_html=True)
 
 
-def run_assess(records: list[dict], limit: int, progress: Progress, anonymise_on: bool) -> list[dict]:
+def run_assess(records: list[dict], limit: int, progress: Progress, anonymise_on: bool,
+               stats: dict | None = None) -> list[dict]:
     """assess.py --pdf on the records; with anonymisation on, the results anonymised (with their PDFs)."""
     from agent import matcher
 
     feed = LIVE_DIR / "feed.jsonl"
-    matcher.write_jsonl(records, feed)
+    matcher.write_jsonl(records, feed, stats or {})
     command = [sys.executable, str(ROOT / "assess.py"), str(feed), "--output-dir", str(LIVE_DIR),
                "--limit", str(limit), "--pdf"]
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -471,7 +498,7 @@ def run_assess(records: list[dict], limit: int, progress: Progress, anonymise_on
         progress.say("Anonymising the results and their PDFs...", "report",
                      {"feed", "match", "evidence", "agent", "checks"})
         results = anonymise.anonymise_results(results)
-        anonymise.write_bundle(results, LIVE_BUNDLE, pdf=True)
+        anonymise.write_bundle(results, LIVE_BUNDLE, pdf=True, feed=stats or {})
     progress.placeholder.markdown(pipeline_html(None, {s[0] for s in STEPS}), unsafe_allow_html=True)
     return results
 
@@ -500,10 +527,11 @@ def live_pull(feeds: set[str], anonymise_on: bool) -> None:
             _check_live(anonymise_on)
             note = "with" if misp_feed.THREATFOX_FEED in pulled else "without"
             progress.say(f"Pulling {', '.join(sorted(pulled))} ({note} a ThreatFox API pull)...", "feed", set())
-            records = build_feed.pull_feeds(pulled, int(days))
-            progress.say(f"{len(records)} match record(s) found.", "match", {"feed"})
+            stats: dict = {}
+            records = build_feed.pull_feeds(pulled, int(days), stats)
+            progress.say(f"{len(records)} match record(s) found. {skipped_text(stats)}".strip(), "match", {"feed"})
             if records:
-                run_assess(records, int(limit), progress, anonymise_on)
+                run_assess(records, int(limit), progress, anonymise_on, stats)
         except SystemExit as exc:
             st.error(str(exc))
 
@@ -515,9 +543,11 @@ def run_live(indicators: list[str], description: str, threat_type: str, progress
 
     _check_live(anonymise_on)
     progress.say("Writing the threat briefing and matching the indicators...", "feed", set())
-    records, _ = build_feed.build_manual(indicators, description or None, days=7, yes=True, threat_type=threat_type)
-    progress.say(f"{len(records)} match record(s) found.", "match", {"feed"})
-    return run_assess(records, 3, progress, anonymise_on) if records else []
+    stats: dict = {}
+    records, _ = build_feed.build_manual(indicators, description or None, days=7, yes=True, threat_type=threat_type,
+                                         stats=stats)
+    progress.say(f"{len(records)} match record(s) found. {skipped_text(stats)}".strip(), "match", {"feed"})
+    return run_assess(records, 3, progress, anonymise_on, stats) if records else []
 
 
 def try_it(results: list[dict], pdf_dir: Path, live: bool, speed: float, anonymise_on: bool) -> None:
@@ -536,7 +566,7 @@ def try_it(results: list[dict], pdf_dir: Path, live: bool, speed: float, anonymi
         except SystemExit as exc:
             st.error(str(exc))
             found = []
-        live_pdfs = LIVE_BUNDLE / "pdf" if anonymise_on else LIVE_DIR / "cases"
+        live_pdfs = LIVE_BUNDLE / "pdf" if anonymise_on else LIVE_DIR / "reports"
         for r in found:
             show_case(r, live_pdfs, anonymise_on)
         if not found:
@@ -580,7 +610,8 @@ def main() -> None:
     names = ["Threat board", "How it works"] + ([] if config.DEMO_ONLY else ["Try it"])
     tabs = st.tabs(names)
     with tabs[0]:
-        threat_board(results, pdf_dir, snapshot, live, feeds, anonymise_on)
+        threat_board(results, pdf_dir, snapshot, live, feeds, anonymise_on,
+                     load_feed_summary(live, anonymise_on, intel_dir))
     with tabs[1]:
         st.markdown("Every alert from the threat feed becomes a case. Code gathers the evidence; the model "
                     "investigates it **without being shown the rule-based answer**, writes the report and picks its "

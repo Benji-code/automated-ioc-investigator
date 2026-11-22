@@ -143,8 +143,10 @@ def to_html(text: str, chart_html: Callable[[str], str] | None = None, heading_o
     in the report becomes <h2> with the default) and capped at <h5>. A chart
     on its own line goes through chart_html; one inside a sentence through
     label (see isolate_charts). Flow ids cited with [[flow F3]] go through
-    flow_link."""
-    lines = isolate_charts(replace_flow_refs(text, flow_link), label).split("\n")
+    flow_link. Known code labels are swapped for plain words (labels.py)."""
+    from .labels import plain_labels  # lazy: labels imports the knowledge base
+
+    lines = isolate_charts(replace_flow_refs(plain_labels(text), flow_link), label).split("\n")
     out: list[str] = []
     paragraph: list[str] = []
     i = 0

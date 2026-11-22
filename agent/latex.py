@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import charts as chart_tools
-from . import casefile, config, evidence, mdrender, report
+from . import casefile, config, evidence, labels, mdrender, report
 
 # --- escaping -------------------------------------------------------------------------
 
@@ -157,6 +157,12 @@ class Refs:
 
         def ids(text: str) -> str:
             return text.replace("-", "--")
+        # Neighbouring markers ("[[flow F16]]-[[flow F17]]", "[[flow F40]], [[flow F44]]") become one,
+        # so a list or range is bracketed once, not nested.
+        pair = re.compile(f"{FLOW}([F0-9, -]+){FLOW}\\s*(,|-)\\s*{FLOW}([F0-9, -]+){FLOW}")
+        while pair.search(tex):
+            tex = pair.sub(lambda m: FLOW + m.group(1) + ("-" if m.group(2).startswith("-") else ", ")
+                           + m.group(3) + FLOW, tex)
         # Inside the writer's own brackets: "(F3)" -> "(F3, Table 1)"; elsewhere add the brackets.
         tex = re.sub(f"\\(\\s*{FLOW}([F0-9, -]+){FLOW}", lambda m: f"({ids(m.group(1))}{table}", tex)
         return re.sub(f"{FLOW}([F0-9, -]+){FLOW}", lambda m: f"({ids(m.group(1))}{table})", tex)
@@ -227,8 +233,8 @@ class _Writer:
 def md_to_latex(text: str, refs: Refs, run_in: bool = False) -> str:
     """The subset of Markdown a report uses, as LaTeX body text. With run_in,
     ### headings become bold labels at the start of the next paragraph, as in
-    a compact report ("The host: ...")."""
-    text = mdrender.FLOW_REF_RE.sub(refs.flows, text)
+    a compact report ("The host: ..."). Known code labels become plain words."""
+    text = mdrender.FLOW_REF_RE.sub(refs.flows, labels.plain_labels(text))
     lines = mdrender.isolate_charts(text, refs.chart).split("\n")
     w = _Writer(refs)
     i = 0
@@ -332,6 +338,43 @@ def stem(result: dict) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", f"{result['indicator']}--{result['affected_asset']}").strip("-")
 
 
+def report_name(result: dict) -> str:
+    """The finished PDF's name in output/reports/: <indicator>-<host>.pdf,
+    with anything but letters, digits, dots and dashes as "_"
+    (203.0.113.80:443 -> 203.0.113.80_443)."""
+    def safe(text) -> str:
+        return re.sub(r"[^A-Za-z0-9.-]+", "_", str(text)).strip("._") or "unknown"
+    return f"{safe(result['indicator'])}-{safe(result['affected_asset'])}.pdf"
+
+
+def summary_name(day: datetime | None = None) -> str:
+    return f"summary-{(day or datetime.now(UTC)):%Y-%m-%d}.pdf"
+
+
+def publish(pdf: Path | None, target: Path) -> Path | None:
+    """Move a compiled PDF from the build folder to `target`, replacing an
+    older copy (a rerun of a case overwrites its report)."""
+    if not pdf:
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pdf.replace(target)
+    return target
+
+
+def build_case_pdf(result: dict, cases_dir: Path, reports_dir: Path) -> Path | None:
+    """Write the case's LaTeX and charts in cases_dir, compile there, and move
+    the PDF to reports_dir/<indicator>-<host>.pdf. None if it did not compile."""
+    return publish(compile_tex(write_case_tex(result, cases_dir)), reports_dir / report_name(result))
+
+
+def build_summary_pdf(results: list[dict], cases_dir: Path, reports_dir: Path) -> tuple[Path, Path | None]:
+    """(summary.tex in cases_dir, the compiled summary-<date>.pdf in reports_dir or None)."""
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    tex = cases_dir / "summary.tex"
+    tex.write_text(render_latex_summary([r for r in results if r.get("VERDICT") != "ERROR"]), encoding="utf-8")
+    return tex, publish(compile_tex(tex), reports_dir / summary_name())
+
+
 def figure_file(result: dict, number: int) -> str:
     return f"{stem(result)}-fig{number}.pdf"
 
@@ -342,7 +385,7 @@ def _title(result: dict) -> str:
     host_text = tex_code(result["affected_asset"]) + (f" ({tex_code(host)})" if host else "")
     assessment = (r"\textbf{" + tex_escape(report._label(result.get("VERDICT"))) + "}"
                   + tex_escape(f" ({result.get('CONFIDENCE') or '-'} confidence)"))
-    facts = [f"Host {host_text}", assessment, tex_escape(f"Source: {evidence.source_name(result)}"),
+    facts = [f"Campus host: {host_text}", assessment, tex_escape(f"Source: {evidence.source_name(result)}"),
              tex_escape(f"{datetime.now(UTC):%d %b %Y}")]
     review = (r"\\{\small\textbf{Marked for analyst review:} see Table~\ref{tab:facts}.}"
               if result.get("needs_review") else "")
@@ -504,7 +547,7 @@ def render_latex_summary(results: list[dict]) -> str:
                                 "yes" if r.get("needs_review") else ""]) + r" \\")
     cases = []
     for n, r in enumerate(ordered, start=1):
-        text = (report._parts(r).get("summary") or r.get("HEADLINE") or "").strip()
+        text = labels.plain_labels((report._parts(r).get("summary") or r.get("HEADLINE") or "").strip())
         text = mdrender.CHART_ANYWHERE_RE.sub("", mdrender.replace_flow_refs(text))
         cases.append(r"\subsection*{" + f"{n}. " + tex_code(r["indicator"]) + r" $\rightarrow$ "
                      + tex_code(r["affected_asset"]) + "}\n" + inline(" ".join(text.split())))
@@ -565,7 +608,8 @@ def main() -> None:
     """Rebuild the PDFs for saved results (e.g. a run made before a TeX engine
     was installed) without running the model again:
 
-        python -m agent.latex output/assessments.json     # -> output/cases/*.pdf, output/summary.pdf
+        python -m agent.latex output/assessments.json
+            # -> output/reports/<indicator>-<host>.pdf and summary-<date>.pdf (build files in output/cases/)
     """
     import argparse
     import json
@@ -575,12 +619,10 @@ def main() -> None:
     args = parser.parse_args()
     data = json.loads(args.assessments.read_text(encoding="utf-8"))
     results = [r for r in (data["results"] if isinstance(data, dict) else data) if r.get("VERDICT") != "ERROR"]
-    cases = args.assessments.parent / "cases"
-    made = [compile_tex(write_case_tex(r, cases)) for r in results]
-    summary = args.assessments.parent / "summary.tex"
-    summary.write_text(render_latex_summary(results), encoding="utf-8")
-    compile_tex(summary)
-    print(f"{sum(1 for m in made if m)} of {len(results)} case PDF(s) compiled in {cases}/")
+    cases, reports = args.assessments.parent / "cases", args.assessments.parent / "reports"
+    made = [build_case_pdf(r, cases, reports) for r in results]
+    build_summary_pdf(results, cases, reports)
+    print(f"{sum(1 for m in made if m)} of {len(results)} case PDF(s) compiled into {reports}/")
 
 
 if __name__ == "__main__":

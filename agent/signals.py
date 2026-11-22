@@ -428,19 +428,38 @@ def baseline_verdict(signals: list[dict], evidence_found: bool) -> dict:
     if not evidence_found:
         return _verdict("INSUFFICIENT_DATA", "high", 1, "No traffic to the flagged IP, live or in the feed.")
     if len(strong) >= 2 or (strong and len(weak) >= 2):
-        return _verdict("LIKELY_THREAT", "medium", 2, f"Threat signals: {', '.join(strong + weak)}.")
+        return _verdict("LIKELY_THREAT", "medium", 2, f"Threat signals: {_words(strong + weak)}.")
     if strong:
-        return _verdict("SUSPICIOUS", "medium", 3, f"One strong threat signal: {strong[0]}.")
+        return _verdict("SUSPICIOUS", "medium", 3, f"One strong threat signal: {_words(strong[:1])}.")
     if benign_anchor and len(weak) <= 2:
         confidence = _false_positive_confidence(signals, against)
         return _verdict("LIKELY_FALSE_POSITIVE", confidence, 4,
-                        f"{' and '.join(benign_anchor)} against threat; no strong threat signal"
-                        + (f" (weak only: {', '.join(weak)})." if weak else "."))
+                        f"{_words(benign_anchor, ' and ')} against threat; no strong threat signal"
+                        + (f" (weak only: {_words(weak)})." if weak else "."))
     if len(weak) >= 2:
-        return _verdict("SUSPICIOUS", "low", 5, f"Several weak threat signals: {', '.join(weak)}.")
+        return _verdict("SUSPICIOUS", "low", 5, f"Several weak threat signals: {_words(weak)}.")
     if against and not weak:
-        return _verdict("LIKELY_FALSE_POSITIVE", "low", 6, f"Only signals against threat: {', '.join(against)}.")
+        return _verdict("LIKELY_FALSE_POSITIVE", "low", 6, f"Only signals against threat: {_words(against)}.")
     return _verdict("SUSPICIOUS", "low", 7, "Nothing clearly for or against: cannot be cleared on this evidence.")
+
+
+# Signal names in plain words, for reasons a reader sees (the verdict notes in reports).
+SIGNAL_WORDS = {
+    "app_explained": "an app label explains the traffic",
+    "campus_spread": "other campus hosts flagged for related indicators",
+    "contact_pattern": "the contact pattern",
+    "dns_anomaly": "unusual DNS use",
+    "known_service": "a known service's normal client",
+    "platform_fit": "the host's platform",
+    "protocol_fit": "the protocol",
+    "shared_infrastructure": "a shared address",
+    "sni_matches_indicator": "the name the host used",
+    "traffic_shape_fit": "the traffic shape",
+}
+
+
+def _words(names: list[str], sep: str = ", ") -> str:
+    return sep.join(SIGNAL_WORDS.get(n, n.replace("_", " ")) for n in names)
 
 
 def _false_positive_confidence(signals: list[dict], against: list[str]) -> str:

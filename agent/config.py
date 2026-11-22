@@ -82,14 +82,20 @@ def _float_env(name: str, default: float | None) -> float | None:
     return float(value) if value else default
 
 
-# Cost guard. Prices are USD per million tokens, for estimating spend when the
-# provider does not report the cost itself (OpenRouter does, with usage
-# accounting). 0 for a local model. Take them from the model's page on
-# openrouter.ai. MAX_RUN_COST_USD (unset = no limit) stops a batch cleanly once
-# the run's spend reaches it.
-PRICE_INPUT_PER_MTOK = _float_env("LLM_PRICE_INPUT_PER_MTOK", 0.0)
-PRICE_OUTPUT_PER_MTOK = _float_env("LLM_PRICE_OUTPUT_PER_MTOK", 0.0)
-MAX_RUN_COST_USD = _float_env("MAX_RUN_COST_USD", None)
+# Cost guard. OpenRouter reports each call's actual cost (usage accounting);
+# these prices are the fallback estimate when it does not. USD per million
+# tokens, and per web search, from openrouter.ai/api/v1/models (checked
+# 13 Nov 2026). A local model costs nothing. LLM_PRICE_* override them.
+MODEL_PRICES = {
+    # model: (input per Mtok, output per Mtok, per web search)
+    "anthropic/claude-haiku-5.5": (0.10, 0.50, 0.01),
+}
+_PRICES = MODEL_PRICES.get(OPENROUTER_MODEL, (0.0, 0.0, 0.0)) if PROVIDER == "openrouter" else (0.0, 0.0, 0.0)
+PRICE_INPUT_PER_MTOK = _float_env("LLM_PRICE_INPUT_PER_MTOK", _PRICES[0])
+PRICE_OUTPUT_PER_MTOK = _float_env("LLM_PRICE_OUTPUT_PER_MTOK", _PRICES[1])
+PRICE_PER_WEB_SEARCH = _float_env("LLM_PRICE_PER_WEB_SEARCH", _PRICES[2])
+# A batch stops cleanly, between cases, once the run's spend reaches this.
+MAX_RUN_COST_USD = _float_env("MAX_RUN_COST_USD", 2.00)
 # Anthropic prompt caching through OpenRouter (anthropic/* models only): the
 # system prompt and case file are marked cacheable, as they repeat in every
 # tool round of a case. PROMPT_CACHE=0 turns it off.
@@ -192,6 +198,8 @@ NETWORK_LABEL = f"the {ORG_NAME} network" if ORG_NAME else "the monitored networ
 # Data stays in UTC; case files add local times so the model can judge time
 # of day without converting.
 LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "UTC").strip() or "UTC"
+# The zone's city for labels and the prompt ("Sydney" for Australia/Sydney).
+LOCAL_CITY = LOCAL_TIMEZONE.split("/")[-1].replace("_", " ")
 # Free-text background on the site (kinds of hosts, usage patterns), given to
 # the model as context. Optional.
 SITE_CONTEXT = os.getenv("SITE_CONTEXT", "").strip()
@@ -217,10 +225,16 @@ MISP_WRITE_KEY = os.getenv("MISP_WRITE_KEY", "").strip()  # only for build_feed.
 MISP_VERIFY_SSL = os.getenv("MISP_VERIFY_SSL", "0").strip().lower() in ("1", "true", "yes", "on")
 MISP_LOOKBACK_DAYS = _int_env("MISP_LOOKBACK_DAYS", 7)
 MISP_TIMEOUT_SEC = _int_env("MISP_TIMEOUT_SEC", 120)
-# Public threat intel looked up online for each case (agent/web_context.py):
-# Malpedia's description of the malware family and ThreatFox's listing of the
-# indicator. Only public names are sent. WEB_CONTEXT=0 turns it off.
-WEB_CONTEXT = os.getenv("WEB_CONTEXT", "1").strip().lower() not in ("0", "false", "no", "off")
+# Outside context about the indicator and threat, looked up once per indicator
+# (agent/web_context.py): Malpedia's description of the malware family,
+# ThreatFox's listing, and a short web search through OpenRouter. Only public
+# names are sent (indicator, malware family, threat type, feed name), never a
+# campus address or host name. On by default with OpenRouter, off with Ollama
+# (the search runs on OpenRouter); WEB_CONTEXT=1 or 0 overrides.
+WEB_CONTEXT = os.getenv("WEB_CONTEXT", "1" if PROVIDER == "openrouter" else "0").strip().lower() \
+    not in ("0", "false", "no", "off")
+WEB_SEARCH_MAX = min(_int_env("WEB_SEARCH_MAX", 3), 3)  # searches per indicator, at most 3 (0 = no web search)
+WEB_CONTEXT_DIR = PROJECT_ROOT / "data" / "web_context"
 # ThreatFox API (sync_threatfox.py copies its IOCs into MISP with their labels).
 ABUSECH_AUTH_KEY = os.getenv("ABUSECH_AUTH_KEY", "").strip()
 THREATFOX_API_URL = "https://threatfox-api.abuse.ch/api/v1/"

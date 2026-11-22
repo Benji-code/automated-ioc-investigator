@@ -43,7 +43,9 @@ def misp_indicators(days: int, refresh: bool = False, misp=None, feeds: set[str]
         if not normal:
             skipped += 1
             continue
-        items.append({"indicator": normal[0], "indicator_type": normal[1], "intel": misp_feed.to_intel(attribute)})
+        url = matcher.listed_url(attribute["value"], attribute["type"])
+        items.append({"indicator": normal[0], "indicator_type": normal[1], "intel": misp_feed.to_intel(attribute),
+                      "listed_urls": [url] if url else []})
     if feeds is not None:
         items = [i for i in items if misp_feed.feed_group(i["intel"]["feed"]) in feeds]
     merged = matcher.merge_indicators(items)
@@ -78,8 +80,15 @@ def manual_indicators(values: list[str]) -> list[dict]:
         if not normal:
             raise SystemExit(f"Not an indicator SuperNetFlow can match: {value!r} (use an IPv4 address, "
                              "ip:port, a domain or a URL).")
-        items.append({"indicator": normal[0], "indicator_type": normal[1]})
-    return list({i["indicator"]: i for i in items}.values())
+        url = matcher.listed_url(value)
+        items.append({"indicator": normal[0], "indicator_type": normal[1], "listed_urls": [url] if url else []})
+    merged: dict[str, dict] = {}
+    for item in items:
+        if item["indicator"] in merged:
+            merged[item["indicator"]]["listed_urls"] += item["listed_urls"]
+        else:
+            merged[item["indicator"]] = item
+    return list(merged.values())
 
 
 def confirm(threat: dict) -> bool:
@@ -104,7 +113,8 @@ def make_briefing(description: str, yes: bool, chat=None) -> dict:
 
 
 def build_manual(values: list[str], description: str | None, days: int, yes: bool = True,
-                 threat_type: str = "unknown", push: bool = False, chat=None) -> tuple[list[dict], dict | None]:
+                 threat_type: str = "unknown", push: bool = False, chat=None,
+                 stats: dict | None = None) -> tuple[list[dict], dict | None]:
     """(match records, briefing) for manual indicators. Used by the CLI and the dashboard."""
     items = manual_indicators(values)
     threat = make_briefing(description, yes, chat) if description and description.strip() else None
@@ -116,10 +126,10 @@ def build_manual(values: list[str], description: str | None, days: int, yes: boo
     intel = manual_intel(threat, threat_type, event_id)
     indicators = [{**item, "intel": dict(intel)} for item in items]
     config.clickhouse_settings()
-    return matcher.match(indicators, days), threat
+    return matcher.match(indicators, days, stats=stats), threat
 
 
-def pull_feeds(feeds: set[str], days: int) -> list[dict]:
+def pull_feeds(feeds: set[str], days: int, stats: dict | None = None) -> list[dict]:
     """Match records for the chosen feeds. ThreatFox in the choice means a
     fresh API pull into MISP first (at most 7 days); without it, the API is
     not called and ThreatFox's events are left out."""
@@ -128,7 +138,7 @@ def pull_feeds(feeds: set[str], days: int) -> list[dict]:
 
         counts = sync_threatfox.sync(min(days, sync_threatfox.MAX_DAYS))
         print(f"ThreatFox: {counts['fetched']} IOC(s) fetched, {counts['added']} new attribute(s) added to MISP.")
-    return matcher.match(misp_indicators(days, feeds=feeds), days)
+    return matcher.match(misp_indicators(days, feeds=feeds), days, stats=stats)
 
 
 def _feed_list(text: str | None) -> set[str] | None:
@@ -143,9 +153,13 @@ def _description(args) -> str | None:
     return args.threat
 
 
-def summarise(records: list[dict], out: Path) -> None:
+def summarise(records: list[dict], out: Path, stats: dict | None = None) -> None:
     pairs = {(r["indicator"], r[config.FEED_ASSET_FIELD]) for r in records}
     print(f"{len(records)} match record(s), {len(pairs)} indicator+host case(s), written to {out}")
+    skipped = (stats or {}).get("skipped_known_service") or []
+    if skipped:
+        print(f"Skipped as known services: {len(skipped)} ({', '.join(skipped[:10])}"
+              + (" ..." if len(skipped) > 10 else "") + ")")
     if not records:
         print("No campus host contacted these indicators in the window: assess.py has nothing to investigate.")
     else:
@@ -174,6 +188,7 @@ def main() -> None:
                         help="manual: also save the indicators as a local MISP event (needs MISP_WRITE_KEY)")
     args = parser.parse_args()
     out = args.out or HERE / "data" / f"{args.source}_matches.jsonl"
+    stats: dict = {}
 
     if args.source == "misp":
         config.clickhouse_settings()  # fail now, before the MISP pull, if .env is missing
@@ -181,16 +196,17 @@ def main() -> None:
             import sync_threatfox
 
             sync_threatfox.sync(min(args.days, sync_threatfox.MAX_DAYS))
-        records = matcher.match(misp_indicators(args.days, args.refresh, feeds=_feed_list(args.feeds)), args.days)
+        records = matcher.match(misp_indicators(args.days, args.refresh, feeds=_feed_list(args.feeds)), args.days,
+                                stats=stats)
     else:
         if not args.indicator:
             raise SystemExit("--source manual needs at least one --indicator.")
         if args.threat and args.threat_file:
             raise SystemExit("Give the threat description once: --threat or --threat-file.")
         records, _ = build_manual(args.indicator, _description(args), args.days, args.yes, args.threat_type,
-                                  args.push_misp)
-    matcher.write_jsonl(records, out)
-    summarise(records, out)
+                                  args.push_misp, stats=stats)
+    matcher.write_jsonl(records, out, stats)
+    summarise(records, out, stats)
 
 
 if __name__ == "__main__":

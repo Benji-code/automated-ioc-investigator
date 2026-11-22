@@ -1,0 +1,59 @@
+# Big link-sharing, redirect, file-sharing and site-hosting services.
+# A feed that lists one URL on these lists a single page, not the service:
+# the flow data only shows the host name, so a match cannot prove that URL
+# was visited. A bare-domain indicator on this list is skipped by the
+# matcher; a URL indicator is kept only where the flow shows the exact host.
+# One name per line; subdomains are covered (sites.google.com covers
+# x.sites.google.com, but google.com is not listed).
+
+# link shorteners and redirectors
+share.google
+goo.gl
+g.co
+bit.ly
+t.co
+tinyurl.com
+ow.ly
+buff.ly
+is.gd
+rebrand.ly
+cutt.ly
+lnkd.in
+safelinks.protection.outlook.com
+urldefense.com
+l.facebook.com
+lm.facebook.com
+
+# file and document sharing
+drive.google.com
+docs.google.com
+forms.gle
+sites.google.com
+storage.googleapis.com
+onedrive.live.com
+1drv.ms
+sharepoint.com
+dropbox.com
+dl.dropboxusercontent.com
+box.com
+wetransfer.com
+we.tl
+mega.nz
+mediafire.com
+
+# site and page hosting
+github.io
+raw.githubusercontent.com
+gitlab.io
+pages.dev
+workers.dev
+netlify.app
+vercel.app
+web.app
+firebaseapp.com
+glitch.me
+blogspot.com
+wixsite.com
+weebly.com
+notion.site
+canva.site

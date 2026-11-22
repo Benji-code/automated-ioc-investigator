@@ -120,11 +120,13 @@ def _search_pages(misp, days: int) -> list:
     attribute_timestamp, not last: `last` filters on the event's publish
     time, and feed fetches republish events, so months-old indicators slip
     through. For fixed-event feeds attribute_timestamp effectively means
-    "currently on the list"."""
+    "currently on the list". Warninglists are applied afterwards
+    (drop_warninglisted): MISP applies them after the page limit, so a page
+    came back short and paging stopped early, losing every later feed."""
     found = []
     for page in range(1, MAX_PAGES + 1):
         batch = misp.search(controller="attributes", type_attribute=ATTRIBUTE_TYPES, to_ids=True,
-                            attribute_timestamp=f"{int(days)}d", enforce_warninglist=True, include_event_tags=True,
+                            attribute_timestamp=f"{int(days)}d", include_event_tags=True,
                             include_context=True, limit=PAGE_SIZE, page=page, pythonify=True)
         if isinstance(batch, dict) and batch.get("errors"):
             raise RuntimeError(f"MISP search failed: {batch['errors']}")
@@ -142,11 +144,42 @@ def pull_indicators(days: int | None = None, misp=None) -> list[dict]:
     misp = misp or client()
     days = days or config.MISP_LOOKBACK_DAYS
     pulled = [_attribute_dict(a) for a in _search_pages(misp, days)]
-    pulled = [p for p in pulled if p["value"]]
+    pulled = drop_warninglisted(misp, [p for p in pulled if p["value"]])
     links = event_links(misp, sorted({p["event_id"] for p in pulled if p["event_id"]}))
     for p in pulled:
         p["references"] = links.get(p["event_id"], [])
     return pulled
+
+
+WARNINGLIST_BATCH = 1000
+
+
+def _site_host(attribute: dict) -> str | None:
+    """The host of a URL that names a whole site (no path or query), e.g.
+    http://8.8.8.8/ -> 8.8.8.8: such a URL lists the host itself, so the host
+    must pass the warninglists too. A URL to a page is checked as a URL."""
+    from urllib.parse import urlsplit
+
+    value = attribute["value"]
+    if attribute.get("type") != "url" and "://" not in value:
+        return None
+    parts = urlsplit(value if "://" in value else f"http://{value}")
+    if parts.path.strip("/") or parts.query:
+        return None
+    return (parts.hostname or "").strip(".").lower() or None
+
+
+def drop_warninglisted(misp, pulled: list[dict]) -> list[dict]:
+    """Attributes whose value (or, for a URL naming a whole site, its host)
+    is on none of MISP's enabled warninglists (CDNs, top sites, public
+    resolvers), checked in batches."""
+    values = sorted({p["value"] for p in pulled} | {h for h in map(_site_host, pulled) if h})
+    listed: set[str] = set()
+    for i in range(0, len(values), WARNINGLIST_BATCH):
+        hits = misp.values_in_warninglist(values[i:i + WARNINGLIST_BATCH])
+        if isinstance(hits, dict) and not hits.get("errors"):
+            listed |= set(hits)
+    return [p for p in pulled if p["value"] not in listed and _site_host(p) not in listed]
 
 
 def event_links(misp, event_ids: list[str]) -> dict[str, list[str]]:
@@ -237,6 +270,8 @@ def threat_type_from(tags: list[str], event_info: str | None) -> str:
             found = _threat_type_in(value or namespace)
             if found:
                 return found
+    if "phish" in (event_info or "").lower():  # Phishtank, OpenPhish, PhishScore, Phishing.Database
+        return "phishing"
     found = _threat_type_in(event_info or "")
     if found:
         return found

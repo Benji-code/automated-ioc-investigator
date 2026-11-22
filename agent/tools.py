@@ -855,7 +855,7 @@ def host_applications(host: str, window: CaseWindow) -> dict:
             "privacy_vpn_apps": sorted(set(relays)),
             "user_agent_platforms": dict(sorted(platforms.items(), key=lambda kv: -kv[1])),
             "user_agents_seen": int(len(agents)),
-            "sources": "subscriber_activity_1m (apps, user_agent), long_flow_summary (attributes.http_user_agent)"}
+            "sources": "subscriber_activity_1m app labels and user agents; long_flow_summary user agents"}
 
 
 RARE_RESOLVER_MAX_CLIENTS = 2      # a DNS server this few campus hosts use is unusual
@@ -1067,3 +1067,41 @@ def shared_infrastructure(server_ips: dict, flows_result: dict, expected: dict, 
     flagged = sum(p["peer_hosts_also_flagged"] for p in valid_peers)
     result = analysis.shared_infrastructure(asn_orgs, expected.get("service"), peer_count, flagged)
     return {"asn_organisations": asn_orgs, **result}
+
+
+def connection_direction(flows: dict, case_rows: list[dict], own_name: str | None) -> dict:
+    """Who most likely opened the connections. SuperNetFlow always records the
+    campus host as the client, so a remote machine connecting TO a campus
+    server shows up as the host "contacting" it, with the remote side's
+    temporary port as the server port. Inbound is inferred when every port on
+    the flagged address is a high (temporary) port and the TLS/DNS name on the
+    matched rows is the host's own name or a campus name. Otherwise unknown."""
+    ports = sorted({int(p.split("/")[0]) for p in flows.get("ports_seen") or [] if p.split("/")[0].isdigit()})
+    names = {str(row.get(key) or "").lower().rstrip(".")
+             for record in case_rows for row in (record.get("evidence") or {}).get("subscriber_activity") or []
+             for key in ("sni", "dns")} - {""}
+    own = (own_name or "").lower().rstrip(".")
+    campus = [n for n in names if n == own or any(n == d or n.endswith("." + d) for d in config.CAMPUS_DOMAINS)]
+    if ports and all(p >= 1024 for p in ports) and campus:
+        return {"inbound_likely": True, "ports": ports, "campus_names": sorted(campus)[:3],
+                "host_ports": host_service_ports(flows),
+                "reason": (f"every port on the flagged address is a high, temporary port ({_port_list(ports)}) and "
+                           f"the name on the matched rows is a campus name ({', '.join(sorted(campus)[:3])}): the "
+                           "flagged address most likely connected TO this host (a campus service being reached), "
+                           "not the host reaching out")}
+    return {"inbound_likely": False, "ports": ports, "campus_names": [], "reason": ""}
+
+
+def host_service_ports(flows: dict) -> list[str]:
+    """The host's own ports on the long flows with the flagged address (their
+    client_port, e.g. ["80/tcp"]): for an inbound case, the service reached."""
+    notable = flows.get("notable") or {}
+    found = {f"{f['client_port']}/{f.get('protocol') or 'tcp'}"
+             for key in ("largest_by_total_bytes", "most_upload_heavy") for f in notable.get(key) or []
+             if str(f.get("client_port") or "").isdigit()}
+    return sorted(found, key=lambda p: int(p.split("/")[0]))[:6]
+
+
+def _port_list(ports: list[int]) -> str:
+    shown = ", ".join(map(str, ports[:6]))
+    return shown + (f" and {len(ports) - 6} more" if len(ports) > 6 else "")

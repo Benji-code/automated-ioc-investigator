@@ -136,6 +136,18 @@ ROLE_EVIDENCE = (
 UNSUPPORTED_ROLE_WORDS = ("research", "experiment", "iot", "camera", "printer", "smart tv", "kiosk")
 
 
+def unsupported_role_words(role: str, ev: dict) -> list[str]:
+    """The words in a role that the evidence does not back (for the self-check's message)."""
+    text = role.lower()
+    words = [w for w in UNSUPPORTED_ROLE_WORDS if w in text]
+    if not any(site in text for site in host_sites(ev)):
+        hints = usage_kinds(ev)
+        categories = {c["category"] for c in (ev.get("host_apps") or {}).get("categories", [])}
+        words += [w for group, needed_hints, needed_categories in ROLE_EVIDENCE for w in group
+                  if w in text and not (hints & set(needed_hints) or categories & set(needed_categories))]
+    return list(dict.fromkeys(words))
+
+
 def role_unsupported(role: str, ev: dict) -> bool:
     """True if the role names something the evidence does not show: each role
     word needs matching activity hints or app categories, or the role must name
@@ -143,8 +155,7 @@ def role_unsupported(role: str, ev: dict) -> bool:
     text = role.lower()
     if any(site in text for site in host_sites(ev)):
         return any(w in text for w in UNSUPPORTED_ROLE_WORDS)
-    other = ev.get("other_traffic", {}) or {}
-    hints = set((other.get("activity_hints") or {}).keys())
+    hints = usage_kinds(ev)  # activity hints and the kinds of use in WHAT THE HOST IS USED FOR
     categories = {c["category"] for c in (ev.get("host_apps") or {}).get("categories", [])}
     for words, needed_hints, needed_categories in ROLE_EVIDENCE:
         if any(w in text for w in words) and not (hints & set(needed_hints) or categories & set(needed_categories)):
@@ -200,10 +211,21 @@ def user_problem(text: str, ev: dict) -> bool:
         return True
     if kind == "unclear":
         return False
-    if usage_kinds(ev) & set(knowledge.USER_EVIDENCE[kind]):
-        return False
+    kinds = usage_kinds(ev)
+    if kinds & set(knowledge.USER_EVIDENCE[kind]):
+        return mixed_use(kind, kinds)
     lowered = text.lower()
     return not any(site in lowered for site in host_sites(ev))
+
+
+def mixed_use(kind: str, kinds: set[str]) -> bool:
+    """True when the host's use points both ways and only weak signs back the
+    reading: streaming or social media beside work tools is everyone's
+    traffic, so a student reading then needs adult content, gaming or study
+    help (knowledge.STRONG_STUDENT_USE)."""
+    if kind != "student" or not kinds & set(knowledge.USER_EVIDENCE["staff"]):
+        return False
+    return not kinds & set(knowledge.STRONG_STUDENT_USE)
 
 
 def role_problem(role: str, ev: dict) -> bool:

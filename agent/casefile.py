@@ -5,10 +5,11 @@ so the model (and a reviewer reading the saved case file) can trace it.
 """
 from __future__ import annotations
 
-from . import charts, config, evidence, schema
+from . import beacon, charts, config, evidence, labels, schema, timeline
 from .analysis import fmt_bytes, fmt_duration
 
 LFS = "long_flow_summary"
+LFS_SCOPE = "long_flow_summary, flows over 1 MB only: smaller or shorter contacts are not counted"
 SA = "subscriber_activity_1m"
 FEED_LABEL = "from the IOC feed, not re-queried"
 
@@ -26,10 +27,20 @@ def _error_line(section: dict) -> str | None:
     return None
 
 
-def _flow_line(f: dict) -> str:
+def _connection(f: dict, inbound: bool) -> str:
+    """Which side each port is on: inbound, the remote's temporary port and
+    the host's service port; otherwise the remote's service port."""
+    if inbound:
+        return (f"{f['server_ip']} from its temporary port {f['server_port']}/{f['protocol']} "
+                f"to host port {f['client_port']}")
+    return (f"{f['server_ip']}:{f['server_port']}/{f['protocol']} (remote service port) "
+            f"from host temporary port {f['client_port']}")
+
+
+def _flow_line(f: dict, inbound: bool = False) -> str:
     line = (
         f"    - {f['start']} -> {f['finish']} ({fmt_duration(f['duration_sec'])}), "
-        f"{f['server_ip']}:{f['server_port']}/{f['protocol']} from client port {f['client_port']}, "
+        f"{_connection(f, inbound)}, "
         f"up {fmt_bytes(f['up_bytes'])} ({f['up_packets']} pkts), "
         f"down {fmt_bytes(f['down_bytes'])} ({f['down_packets']} pkts), up/down ratio {f['up_down_ratio']}"
     )
@@ -70,6 +81,16 @@ def _intel_lines(identity: dict) -> list[str]:
     refs = identity.get("intel_references") or []
     if refs:
         lines.append(f"Source references: {', '.join(str(r) for r in refs[:5])}")
+    urls = identity.get("intel_listed_urls") or []
+    if urls:
+        lines.append(f"URL(s) the source listed: {', '.join(urls)}")
+    service = identity.get("intel_known_service")
+    if service:
+        lines.append(
+            f"KNOWN SERVICE: {identity['indicator']} belongs to {service}, a large link-sharing, file-sharing or "
+            "site-hosting service. The source listed one URL on it, not the whole service. Flow records show "
+            "only the host name (TLS SNI or DNS), never the URL path, so a domain match CANNOT prove that the "
+            f"listed URL was visited: it only shows the host used {service} at that time.")
     metadata = identity.get("ioc_metadata")
     if metadata:
         lines.append("Source entry details (entered by hand in data/ioc_metadata.json):")
@@ -198,33 +219,58 @@ Threat: {malware.get('family')}
 Malware family: {malware.get('family')}
   {malware.get('notes')}
 Threat type {identity['threat_type']}:
-  Expected traffic shape: {threat.get('expected_traffic_shape')}
-  Expected recurrence: {threat.get('expected_recurrence')}
-  Common false-positive pattern: {threat.get('false_positive_pattern')}
+{_threat_type_lines(threat)}
 {_service_block(expected.get('service'), expected.get('service_port_fit', []), expected.get('service_port_verdict'))}"""
+
+
+THREAT_TYPE_LINES = (
+    ("affected_means", "What \"affected\" means here"),
+    ("match_means", "A real match means"),
+    ("victim_traffic", "What an affected host's traffic looks like"),
+    ("expected_traffic_shape", "Expected traffic shape"),
+    ("expected_recurrence", "Expected recurrence"),
+    ("false_positive_pattern", "Common false-positive pattern"),
+    ("consequence", "What is at stake"),
+    ("next_steps", "Next steps if real"),
+)
+
+
+def _threat_type_lines(threat: dict) -> str:
+    """The threat-type profile's fields that are filled in. match_means and
+    victim_traffic only for profiles that say what "affected" means, so
+    malware profiles read as before."""
+    keys = [k for k, _ in THREAT_TYPE_LINES]
+    if not threat.get("affected_means"):
+        keys = [k for k in keys if k not in ("match_means", "victim_traffic")]
+    return "\n".join(f"  {label}: {threat[key]}" for key, label in THREAT_TYPE_LINES
+                     if key in keys and threat.get(key))
 
 
 # --- step 5 --------------------------------------------------------------------
 
-def _port_lines(ports: list[dict]) -> str:
+def _side(inbound: bool) -> str:
+    return "remote temporary port " if inbound else "remote service port "
+
+
+def _port_lines(ports: list[dict], inbound: bool = False) -> str:
     return "\n".join(
-        f"    - {p['port']}/{p['protocol']}: {p['flows']} flow(s), up {fmt_bytes(p['up_bytes'])} "
+        f"    - {_side(inbound)}{p['port']}/{p['protocol']}: {p['flows']} flow(s), up {fmt_bytes(p['up_bytes'])} "
         f"({p['up_packets']} pkts), down {fmt_bytes(p['down_bytes'])} ({p['down_packets']} pkts), "
         f"total duration {fmt_duration(p['total_duration_sec'])}, {p['first_start']} to {p['last_finish']}"
         for p in ports
     ) or "    (no long flows)"
 
 
-def _activity_port_lines(ports: list[dict]) -> str:
+def _activity_port_lines(ports: list[dict], inbound: bool = False) -> str:
     return "\n".join(
-        f"    - {p['port']}/{p['protocol']}: {p['active_minutes']} active minute(s), "
+        f"    - {_side(inbound)}{p['port']}/{p['protocol']}: {p['active_minutes']} active minute(s), "
         f"up {fmt_bytes(p['up_bytes'])} ({p['up_packets']} pkts), "
         f"down {fmt_bytes(p['down_bytes'])} ({p['down_packets']} pkts), {p['first_minute']} to {p['last_minute']}"
         for p in ports
     ) or "    (no per-minute rows in the retention window)"
 
 
-def _classification_lines(c: dict) -> str:
+def _classification_lines(c: dict, inbound: bool = False) -> str:
     lines = [f"  Large-flow pattern ({LFS}, flows over 1 MB only): {c['pattern']} - {c['description']}",
              "  (Check-ins and beacons are judged in CONTACT PATTERN below, from per-minute data, not here.)"]
     held = c.get("held_open")
@@ -243,7 +289,7 @@ def _classification_lines(c: dict) -> str:
             f"longest gap between held-open flows {longest}."
         )
         lines.append("  Held-open flows:")
-        lines.extend(_flow_line(f) for f in held["flows"])
+        lines.extend(_flow_line(f, inbound) for f in held["flows"])
     other = c.get("other_flows") or {}
     if other.get("count"):
         lines.append(f"  Other flows over 1 MB (under an hour): {other['count']}.")
@@ -254,13 +300,13 @@ def _flow_key(f: dict) -> tuple:
     return f["start"], f["client_port"]
 
 
-def _notable_lines(notable: dict, already_listed: set[tuple]) -> str:
+def _notable_lines(notable: dict, already_listed: set[tuple], inbound: bool = False) -> str:
     largest = notable["largest_by_total_bytes"]
     new = [f for f in largest if _flow_key(f) not in already_listed]
     repeated = len(largest) - len(new)
     note = f" ({repeated} of the top {len(largest)} are the held-open flows listed above)" if repeated else ""
     lines = [f"  Largest flows by total bytes{note}:"]
-    lines.extend(_flow_line(f) for f in new)
+    lines.extend(_flow_line(f, inbound) for f in new)
     heavy_total = notable.get("upload_heavy_total")
     if heavy_total:
         lines.append(
@@ -268,7 +314,7 @@ def _notable_lines(notable: dict, already_listed: set[tuple]) -> str:
             f"{fmt_duration(heavy_total['min_duration_sec'])} to {fmt_duration(heavy_total['max_duration_sec'])}, "
             f"{fmt_bytes(heavy_total['up_bytes'])} up vs {fmt_bytes(heavy_total['down_bytes'])} down in total. Most upload-heavy:"
         )
-        lines.extend(_flow_line(f) for f in notable["most_upload_heavy"])
+        lines.extend(_flow_line(f, inbound) for f in notable["most_upload_heavy"])
     else:
         lines.append("  Upload-heavy flows (up at least 2x down): none.")
     return "\n".join(lines)
@@ -277,6 +323,32 @@ def _notable_lines(notable: dict, already_listed: set[tuple]) -> str:
 def _held_open_keys(classification: dict) -> set[tuple]:
     held = classification.get("held_open") or {}
     return {_flow_key(f) for f in held.get("flows", [])}
+
+
+def _direction_line(flows: dict) -> str:
+    direction = flows.get("direction") or {}
+    if not direction.get("inbound_likely"):
+        return ""
+    return (f"\nDirection (inferred): INBOUND. {direction['reason'][0].upper()}{direction['reason'][1:]}. In these "
+            "records \"up\" is what the host sent back and \"server port\" is the remote side's temporary port. The "
+            "campus name on those rows is this host's own service name (what the remote side asked for), not a name "
+            "of the flagged address.")
+
+
+def port_sides_line(direction: dict) -> str:
+    """Which side each port belongs to, stated once at the top of the flows."""
+    ports = direction.get("ports") or []
+    if not ports:
+        return "Port sides: no ports recorded."
+    listed = ", ".join(map(str, ports[:6])) + (f" and {len(ports) - 6} more" if len(ports) > 6 else "")
+    if direction.get("inbound_likely"):
+        host = direction.get("host_ports") or []
+        served = (f"The host's service port(s): {', '.join(host)}." if host else
+                  "The host's service port is not recorded (per-minute rows hold only the remote side's port).")
+        return (f"Port sides: {served} Ports like {listed} are the remote side's temporary ports, not services "
+                "on the host.")
+    return (f"Port sides: {listed} {'is' if len(ports) == 1 else 'are'} the remote side's service port(s), on the "
+            "flagged address; the host's own ports are temporary client ports.")
 
 
 def _flows_section(flows: dict) -> str:
@@ -308,19 +380,21 @@ def _flows_section(flows: dict) -> str:
         for p in flows["active_periods"]
     ) or "    (none)"
     dates = ", ".join(activity.get("active_dates", [])) or "(none in retention window)"
+    inbound = bool((flows.get("direction") or {}).get("inbound_likely"))
     return f"""{header}
+{port_sides_line(flows.get("direction") or {})}
 Window: {LFS} {window['long_flow_summary']}; {SA} {window['subscriber_activity_1m']}
   What was checked:
 {checked}
-Ports seen (both tables): {', '.join(flows['ports_seen']) or '(none)'}
-Per-port breakdown ({lfs}, {flows['long_flow_count']} flow(s)):
-{_port_lines(flows['ports'])}
+Ports seen (both tables): {', '.join(flows['ports_seen']) or '(none)'}{_direction_line(flows)}
+Per-port breakdown ({lfs}, flows over 1 MB only, {flows['long_flow_count']} flow(s)):
+{_port_lines(flows['ports'], inbound)}
 Per-port activity ({sa}):
-{_activity_port_lines(activity.get('ports', []))}
-{_classification_lines(flows['classification'])}
-{_notable_lines(flows['notable'], _held_open_keys(flows['classification']))}
+{_activity_port_lines(activity.get('ports', []), inbound)}
+{_classification_lines(flows['classification'], inbound)}
+{_notable_lines(flows['notable'], _held_open_keys(flows['classification']), inbound)}
 {exfil_line}{_retention_line(flows)}
-  Active periods ({lfs}, flows less than 1 hour apart merged):
+  Active periods ({lfs}, flows over 1 MB only, less than 1 hour apart merged):
 {periods}
   Dates with per-minute activity ({sa}): {dates}"""
 
@@ -376,11 +450,12 @@ def _features_section(features: list[dict]) -> str:
 
 
 def _local_pair(first, last, sep: str = " / ") -> str:
-    """" [local: a / b]" when a local time zone is set, else empty."""
+    """" [<city> time: a / b]", e.g. [Sydney time: ...] (the zone's city) when a local time zone is set,
+    else empty. Not "[local: ...]": the model copied "local" as a zone name."""
     a, b = config.to_local(first), config.to_local(last)
     if not a:
         return ""
-    return f" [local: {a}{sep}{b}]"
+    return f" [{config.LOCAL_CITY} time: {a}{sep}{b}]"
 
 
 # --- steps 7-8 -----------------------------------------------------------------
@@ -422,7 +497,7 @@ Window: {LFS} {window['long_flow_summary']}; {SA} {window['subscriber_activity_1
 {services}
   Top destinations by bytes ({SA}):
 {top}
-  Long-lived flows (1 hour or longer) to other IPs ({LFS}):
+  Long-lived flows (1 hour or longer) to other IPs ({LFS}, flows over 1 MB only):
 {long_lived}
   Root domains contacted, busiest first ({SA}, {other['distinct_root_domains']} distinct): {domains}
   Activity types from ALL its root domains (not only the busiest listed above): {_activity_text(other.get('activity_hints') or {})}
@@ -488,7 +563,7 @@ def _peers_section(peers: list[dict], shared: dict) -> str:
             continue
         port = f" port {p['server_port']}" if p["server_port"] else " (any port)"
         lines.append(
-            f"  {p['server_ip']}{port}, last {p['lookback_days']} days ({LFS}): {p['distinct_host_count']} "
+            f"  {p['server_ip']}{port}, last {p['lookback_days']} days ({LFS_SCOPE}): {p['distinct_host_count']} "
             f"distinct {config.HOST_LABEL}(s), {p['other_host_count']} besides this one; "
             f"{p['peer_hosts_also_flagged']} also flagged by other IOCs in the feed."
         )
@@ -549,7 +624,56 @@ def _contact_section(contact: dict) -> str:
         lines.append(f"  Time of day ({config.LOCAL_TIMEZONE}): {f['hour_spread']} of 24 hours, night (00-06) share "
                      f"{f['night_share']:.0%}{flows}")
         lines.append(f"  Burst starts (first {len(f['burst_starts'])}): {', '.join(f['burst_starts'])}")
+        lines += _contact_size_lines(contact)
     return "\n".join(lines)
+
+
+MAX_SIZED_CONTACTS = 12
+
+
+def _session_lines(contact: dict, n_contacts: int) -> list[str]:
+    """The contacts grouped into sessions, with each session's size, and the
+    way to count them in the report ("4 contacts in 2 sessions")."""
+    sessions = beacon.contact_sessions(contact, timeline.EPISODE_GAP_MIN)
+    lines = [f"  Count: {n_contacts} contact(s) in {len(sessions)} session(s) (contacts under "
+             f"{timeline.EPISODE_GAP_MIN} min apart are one session). Count them this way in the report, e.g. "
+             f"\"{n_contacts} contacts in {len(sessions)} sessions\"; never call them \"twice\" or \"N times\" "
+             "unless that is the number of contacts."]
+    for i, session in enumerate(sessions[:MAX_SIZED_CONTACTS], 1):
+        span = session["start"][:16] + (f" to {session['end'][11:16]}" if session["end"] != session["start"] else "")
+        local = config.to_local(session["start"])
+        split = (f" ({fmt_bytes(session['up'])} up / {fmt_bytes(session['down'])} down)"
+                 if session["up"] is not None else "")
+        lines.append(f"    Session {i}: {span} UTC{f' [{local}]' if local else ''}: {session['contacts']} "
+                     f"contact(s), {fmt_bytes(session['total'])}{split}")
+    return lines
+
+
+def _contact_size_lines(contact: dict) -> list[str]:
+    """Each contact's size and the totals, in time order, so per-contact
+    statements can be checked against them."""
+    sizes = beacon.contact_sizes(contact)
+    if not sizes:
+        return []
+    days = sorted({s["start"][:10] for s in sizes})
+    span = (f" The contacts fall on {len(days)} different days ({days[0]} to {days[-1]}): give the full date "
+            "with every time in the report." if len(days) > 1 else "")
+    lines = [f"  Each contact (time order; UTC, then {config.LOCAL_CITY} time; size up / down):{span}"]
+    for i, s in enumerate(sizes[:MAX_SIZED_CONTACTS], 1):
+        local = config.to_local(s["start"])
+        split = f" ({fmt_bytes(s['up'])} up / {fmt_bytes(s['down'])} down)" if s["up"] is not None else ""
+        lines.append(f"    {i}. {s['start'][:16]} UTC{f' [{local}]' if local else ''}: {fmt_bytes(s['total'])}{split}")
+    if len(sizes) > MAX_SIZED_CONTACTS:
+        lines.append(f"    ... and {len(sizes) - MAX_SIZED_CONTACTS} more")
+    lines += _session_lines(contact, len(sizes))
+    totals = beacon.contact_totals(contact)
+    split = (f" ({fmt_bytes(totals['up'])} up / {fmt_bytes(totals['down'])} down)"
+             if totals["up"] is not None else "")
+    largest = max(s["total"] for s in sizes)
+    smallest = min(s["total"] for s in sizes)
+    lines.append(f"  All {len(sizes)} contact(s) together: {fmt_bytes(totals['total'])}{split}; largest "
+                 f"{fmt_bytes(largest)}, smallest {fmt_bytes(smallest)}.")
+    return lines
 
 
 def remote_address(row: dict) -> str:
@@ -560,13 +684,16 @@ def remote_address(row: dict) -> str:
     return f"{row['server_ip']}:{row['port']}/{row['protocol']}" + (f" (+{extra} more IPs)" if extra > 0 else "")
 
 
-def _timeline_row(row: dict) -> str:
+def _timeline_row(row: dict, inbound: bool = False) -> str:
     when = row["start"][11:16] + (f"-{row['end'][11:16]}" if row["end"] != row["start"] else "")
-    return (f"    {row['id']} {when} ({row['minutes']} active min) {remote_address(row)}  {row['remote']}; "
+    address = remote_address(row)
+    if row.get("flagged") and row.get("server_ip"):
+        address += " (remote temporary port)" if inbound else " (remote service port)"
+    return (f"    {row['id']} {when} ({row['minutes']} active min) {address}  {row['remote']}; "
             f"up {fmt_bytes(row['up_bytes'])}, down {fmt_bytes(row['down_bytes'])}, {row['flows']} flow(s)")
 
 
-def _timeline_section(timeline: dict | None) -> str:
+def _timeline_section(timeline: dict | None, inbound: bool = False) -> str:
     header = "[STEP 5e] FLOW TIMELINE AROUND THE CONTACT (what else the host was doing at the same moments)"
     timeline = timeline or {}
     if "error" in timeline:
@@ -592,7 +719,7 @@ def _timeline_section(timeline: dict | None) -> str:
             continue
         lines.append(f"    {ep.get('sites', 0)} site(s) in the window, {ep.get('flagged', 0)} of them flagged "
                      f"address(es); {ep['shown']} listed:")
-        lines.extend(_timeline_row(r) for r in timeline["rows"] if r["episode"] == ep["n"])
+        lines.extend(_timeline_row(r, inbound) for r in timeline["rows"] if r["episode"] == ep["n"])
         if ep.get("other_count"):
             more = ep["other_count"] - len(ep["other_sites"])
             lines.append(f"    Other sites in the window, not listed ({ep['other_count']}, largest first): "
@@ -724,9 +851,13 @@ def _host_type_section(result: dict | None) -> str:
         return f"{title} ({result.get('period', '')}): {result.get('note', 'no classification')}\n\n"
     from .host_type import fmt_feature
 
-    lines = [f"{title}, from the host's own traffic {result['period']}:",
-             f"  Classified as: {result['name']} [{result['label']}], confidence {result['confidence']:.2f}, "
-             f"by {result['method']}"]
+    lines = [f"{title}, from the host's own traffic {result['period']}:"]
+    if labels.host_type_uncertain(result):
+        lines.append(f"  {labels.host_type_text(result).capitalize()}. Do not state a host type as fact: describe "
+                     "what the traffic shows (volumes, hours, kinds of use, remote addresses) and give the best "
+                     "guess only as a guess.")
+    lines.append(f"  Classified as: {result['name']} [{result['label']}], confidence {result['confidence']:.2f}, "
+                 f"by {result['method']}")
     others = {k: v for k, v in (result.get("alternatives") or {}).items() if k != result["label"]}
     if others:
         lines.append("  Other possible types: " + ", ".join(f"{k} {v:.2f}" for k, v in others.items()))
@@ -787,6 +918,12 @@ def _public_intel_section(found: dict | None) -> str:
                                                                  if listing.get("reference") else ""))
     if not found.get("threatfox") and "ThreatFox" not in " ".join(found.get("errors") or []):
         lines.append("  ThreatFox: no listing of this exact indicator.")
+    web = found.get("web")
+    if web and web.get("summary"):
+        lines.append("  WEB CONTEXT (external, unverified; cite the source URL). Flow data outranks it: if they "
+                     "conflict, follow the flow data and say so. It never decides the verdict on its own.")
+        lines += [f"    {line}" for line in web["summary"].splitlines()]
+        lines += [f"    Source: {source['url']}" for source in web.get("sources") or []]
     lines += [f"  (lookup failed: {error})" for error in found.get("errors") or []]
     return "\n".join(lines)
 
@@ -796,8 +933,8 @@ DATA_LIMITATIONS = [
     "long_flow_summary only holds flows over a size/duration threshold; short flows are missing.",
     "subscriber_activity_1m keeps about 15 days; older per-minute detail is gone.",
     "Visitors reaching the host through a tunnel appear as the tunnel server's IP, so they are hidden.",
-    "Threat context comes from a local knowledge base and the public sources cited (Malpedia, ThreatFox); "
-    "nothing else was looked up online.",
+    "Threat context comes from a local knowledge base and the public sources cited (Malpedia, ThreatFox and, "
+    "when listed, a web search); nothing else was looked up online.",
 ]
 
 
@@ -831,7 +968,7 @@ The source's confidence rates the indicator, not this host.
 
 {_contact_section(ev.get('contact') or {"pattern": "insufficient_data", "description": "not run", "features": {}})}
 
-{_timeline_section(ev.get('timeline'))}
+{_timeline_section(ev.get('timeline'), bool(((ev.get('flows') or {}).get('direction') or {}).get('inbound_likely')))}
 
 {_apps_section(ev.get('app_context') or {}, ev.get('host_apps') or {})}
 

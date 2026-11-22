@@ -255,6 +255,8 @@ def case_identity(key: tuple[str, str], rows: list[dict], ioc_metadata: dict[str
         "intel_confidence": _confidence(info.get("confidence")),
         "intel_tags": list(info.get("tags") or []),
         "intel_references": list(info.get("references") or []),
+        "intel_listed_urls": list(info.get("listed_urls") or []),
+        "intel_known_service": info.get("known_service"),
         "threat_ref": info.get("threat_ref"),
         "intel_source_first_seen": info.get("source_first_seen"),
         "intel_source_last_seen": info.get("source_last_seen"),

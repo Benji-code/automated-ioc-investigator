@@ -861,45 +861,68 @@ def _load_chart(ev: dict, host: str) -> dict | None:
     return None if error else chart
 
 
+MIN_USAGE_SHARE = 0.01  # kinds of use under 1% of the host's traffic are left off the chart
+
+
 def _usage_chart(ev: dict, host: str) -> dict | None:
-    """The host's traffic by kind of use (adult content, gaming, ...)."""
+    """The host's traffic by kind of use (adult content, gaming, ...), kinds
+    under 1% of its traffic hidden. Fewer than two kinds left: no chart (one
+    bar says nothing a sentence would not)."""
     other = ev.get("other_traffic") or {}
-    categories = (other.get("activity_profile") or {}).get("categories") or []
-    if not categories:
+    profile = other.get("activity_profile") or {}
+    total = profile.get("total_bytes") or 0
+    categories = [c for c in profile.get("categories") or []
+                  if (c.get("share") if c.get("share") is not None else (c["bytes"] / total if total else 0))
+                  >= MIN_USAGE_SHARE]
+    if len(categories) < 2:
         return None
     frame = pd.DataFrame([{"use": c["category"], "traffic": c["bytes"]} for c in categories])
     chart, error = build_chart({
         "id": "usage", "kind": "bar", "x": "use", "y": ["traffic"], "unit": "bytes",
         "title": "What the host is used for: its traffic by kind of use", "sql": "",
         "source": f"subscriber_activity_1m, {(other.get('window') or {}).get('subscriber_activity_1m', '')}".rstrip(", "),
-        "caption": "Sites grouped by kind of use from a local list; traffic to unlisted sites is not shown."},
+        "caption": "Sites grouped by kind of use from a local list; categories under 1% of the host's traffic "
+                   "hidden; unlisted sites not shown."},
         frame, host, highlight=[])
     return None if error else chart
 
 
 def _host_type_chart(ev: dict, host: str) -> dict | None:
-    """Where the host sits among measured hosts of its type, per feature."""
+    """Where the host sits among measured hosts of its type, per feature.
+    No chart when the type is unclear (labels.host_type_uncertain): comparing
+    the host with a type it may not be says nothing."""
+    from .labels import host_type_name, host_type_uncertain  # lazy: labels imports the knowledge base
+
     kind = ev.get("host_type") or {}
     comparison = kind.get("comparison") or {}
     rows = [r for r in comparison.get("rows", []) if r.get("percentile") is not None]
-    if not comparison.get("measured") or len(rows) < 3:
+    if not comparison.get("measured") or len(rows) < 3 or host_type_uncertain(kind):
         return None
     frame = pd.DataFrame([{"feature": r["description"], "percentile": r["percentile"]} for r in rows])
     unusual = [r["description"] for r in rows if r["position"] != "typical"]
     chart, error = build_chart({
         "id": "host_vs_type", "kind": "bar", "x": "feature", "y": ["percentile"], "unit": "other",
-        "title": f"Where the host sits among typical {kind.get('label', '')} hosts (percentile)",
+        "title": f"Where the host sits among typical {host_type_name(kind.get('label'))}s (percentile)",
         "sql": "", "source": comparison.get("source", ""),
         "caption": "50 is the median host of its type; below 5 or above 95 (highlighted) is unusual for the type."},
         frame, host, highlight=unusual)
     return None if error else chart
 
 
+def _remote_site(name: str | None) -> bool:
+    name = str(name or "").lower().rstrip(".")
+    if not name or re.fullmatch(r"[\d.]+", name) or "." not in name:
+        return False
+    return not any(name == d or name.endswith("." + d) for d in config.CAMPUS_DOMAINS)
+
+
 def _sites_chart(ev: dict, host: str) -> dict | None:
     entry = next((n for n in ev.get("names_on_ip") or [] if n.get("domains")), None)
-    if not entry or len(entry["domains"]) < 2:
+    # Only names of the flagged address: campus names and bare addresses on inbound rows are the campus host's own.
+    domains = [d for d in (entry or {}).get("domains") or [] if _remote_site(d.get("root_domain"))]
+    if len(domains) < 2:
         return None
-    frame = pd.DataFrame([{"site": d["root_domain"], "hosts": d["hosts"]} for d in entry["domains"]])
+    frame = pd.DataFrame([{"site": d["root_domain"], "hosts": d["hosts"]} for d in domains])
     own = (ev.get("names") or {}).get("registered_domains") or []
     chart, error = build_chart({
         "id": "sites_on_ip", "kind": "bar", "x": "site", "y": ["hosts"], "unit": "count",
@@ -951,7 +974,7 @@ def _apps_chart(ev: dict, host: str) -> dict | None:
     categories = (ev.get("host_apps") or {}).get("categories") or []
     if len(categories) < 2:
         return None
-    frame = pd.DataFrame([{"category": c["category"], "minutes": c["minutes"]} for c in categories])
+    frame = pd.DataFrame([{"category": plain_category(c["category"]), "minutes": c["minutes"]} for c in categories])
     chart, error = build_chart({
         "id": "apps", "kind": "bar", "x": "category", "y": ["minutes"], "unit": "count",
         "title": "The host's traffic by app category, in active minutes", "sql": "",
@@ -997,9 +1020,19 @@ PDF_WIDTH_IN = 7.0  # the LaTeX text width (17.8 cm), so chart text prints at it
 PDF_LABEL_CHARS = 38
 
 
+# SuperNetFlow's placeholder app labels, in plain words.
+RAW_CATEGORIES = {"_unknown": "no app label"}
+
+
+def plain_category(name) -> str:
+    return RAW_CATEGORIES.get(str(name), str(name))
+
+
 def pdf_label(text) -> str:
     """Text for a matplotlib label: no raw <, > or ~ (they read badly next to
-    LaTeX's own text) and no $ (matplotlib would start maths)."""
+    LaTeX's own text), no $ (matplotlib would start maths), and no raw
+    placeholder labels such as _unknown."""
+    text = plain_category(text)
     text = re.sub(r"<([^<>\s]+)>", r"(\1)", str(text))  # <name> -> (name)
     for raw, plain in (("<=", "at most "), (">=", "at least "), ("<", "under "), (">", "over "), ("~", "about "),
                        ("$", r"\$")):

@@ -103,6 +103,11 @@ def features(frame: pd.DataFrame, bin_minutes: int, window_minutes: float) -> di
         # Every burst's [first bin, last bin, bytes], for the flow timeline around the contact.
         "burst_spans": [[fmt_time(b["start"]), fmt_time(b["end"]), b["up"] + b["down"]]
                         for b in bursts[:MAX_KEPT_BURSTS]],
+        # [first bin, last bin, up, down] per burst, so the report can quote each contact's size.
+        "burst_sizes": [[fmt_time(b["start"]), fmt_time(b["end"]), b["up"], b["down"]]
+                        for b in bursts[:MAX_KEPT_BURSTS]],
+        "total_up_bytes": int(sum(b["up"] for b in bursts)),
+        "total_down_bytes": int(sum(b["down"] for b in bursts)),
         "gap_regularity": _regularity_score(gaps) if len(gaps) >= 2 else None,
         "median_gap_min": round(float(np.median(gaps)), 1) if len(gaps) else None,
         "volume_consistency": consistency if len(bursts) > 1 else None,
@@ -147,3 +152,46 @@ def analyse(frame: pd.DataFrame, bin_minutes: int, window_minutes: float, source
     pattern = classify(f)
     return {"pattern": pattern, "description": PATTERNS[pattern], "features": f,
             "source": source, "resolution_min": bin_minutes}
+
+
+def contact_sizes(contact: dict | None) -> list[dict]:
+    """Each contact burst as {start, end, up, down, total} bytes. Evidence
+    saved before burst_sizes existed has totals only (up/down None)."""
+    f = (contact or {}).get("features") or {}
+    if f.get("burst_sizes"):
+        return [{"start": s, "end": e, "up": up, "down": down, "total": up + down}
+                for s, e, up, down in f["burst_sizes"]]
+    return [{"start": s, "end": e, "up": None, "down": None, "total": total}
+            for s, e, total in f.get("burst_spans") or []]
+
+
+def contact_totals(contact: dict | None) -> dict:
+    """{"total", "up", "down"} bytes over every contact burst (up/down None if unknown)."""
+    f = (contact or {}).get("features") or {}
+    sizes = contact_sizes(contact)
+    up, down = f.get("total_up_bytes"), f.get("total_down_bytes")
+    rows = ((contact or {}).get("series") or {}).get("rows") or []
+    if up is None and rows:  # evidence saved before the totals: the chart series keeps every byte
+        up, down = sum(r[1] for r in rows), sum(r[2] for r in rows)
+    total = up + down if up is not None and down is not None else sum(s["total"] for s in sizes)
+    return {"total": total, "up": up, "down": down}
+
+
+def contact_sessions(contact: dict | None, gap_minutes: int) -> list[dict]:
+    """Contacts grouped into sessions: a contact starting within gap_minutes
+    of the previous one's end joins its session. Each session: {start, end,
+    contacts, up, down, total} (up/down None if unknown)."""
+    sessions: list[dict] = []
+    for c in contact_sizes(contact):
+        start, end = pd.Timestamp(c["start"]), pd.Timestamp(c["end"])
+        last = sessions[-1] if sessions else None
+        if last and (start - pd.Timestamp(last["end"])).total_seconds() <= gap_minutes * 60:
+            last["end"] = max(pd.Timestamp(last["end"]), end).strftime("%Y-%m-%d %H:%M:%S")
+            last["contacts"] += 1
+            last["total"] += c["total"]
+            for key in ("up", "down"):
+                last[key] = None if last[key] is None or c[key] is None else last[key] + c[key]
+            continue
+        sessions.append({"start": c["start"], "end": c["end"], "contacts": 1, "up": c["up"], "down": c["down"],
+                         "total": c["total"]})
+    return sessions

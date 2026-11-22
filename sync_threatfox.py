@@ -86,16 +86,24 @@ def to_attribute(ioc: dict) -> dict | None:
 
 # --- MISP ----------------------------------------------------------------------------
 
+def search_terms(values: list[str]) -> list[str]:
+    """What to search MISP for: a composite ip|port value is found by its IP
+    (MISP matches each half of a composite attribute on its own, so the full
+    "ip|port" string never matches)."""
+    return sorted({value.split("|", 1)[0] for value in values})
+
+
 def existing_values(misp, values: list[str]) -> set[str]:
-    """The values already in MISP (any event)."""
+    """The values already in MISP (any event), compared in full."""
     found: set[str] = set()
-    for i in range(0, len(values), SEARCH_BATCH):
-        batch = values[i:i + SEARCH_BATCH]
+    terms = search_terms(values)
+    for i in range(0, len(terms), SEARCH_BATCH):
+        batch = terms[i:i + SEARCH_BATCH]
         result = misp.search(controller="attributes", value=batch, pythonify=True)
         if isinstance(result, dict):
             raise RuntimeError(f"MISP search failed: {result.get('errors')}")
         found |= {str(misp_feed._get(a, "value")) for a in result or []}
-    return found
+    return found & set(values)
 
 
 def event_for(misp, title: str) -> str:
