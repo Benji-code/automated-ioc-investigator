@@ -118,3 +118,18 @@ one visit.
 
 The tables used, what each can and can't show, and how long each keeps data
 are in [schema.md](schema.md).
+
+## After the automated report
+
+The agent does triage at scale: every match gets a first assessment, so the
+team only looks closely at the cases that matter. Reports that go to the
+supervisor are finished in an analyst stage, run with Claude Code. For a case
+taken forward (whether its verdict stood or it was marked for review), the
+analyst runs follow-up queries against SuperNetFlow and the team's case
+database (daily host history, campus percentiles, IOC match records),
+cross-checks with teammates' findings, agrees a narrative with the team, and
+writes a final LaTeX/PDF incident report with figures.
+
+The same stage is not limited to IOC matches. When a CVE is disclosed, it can
+run a campus-wide hunt for the exploit's traffic shape (for example,
+request-heavy uploads to web servers), with no indicator needed.
