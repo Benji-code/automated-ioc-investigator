@@ -3,12 +3,14 @@
 An LLM agent that investigates threat-intelligence alerts on a campus network
 and writes the incident report an analyst would.
 
-When a campus host contacts an address or domain on a threat-intelligence
-list (a local [MISP](https://www.misp-project.org) that combines public feeds,
-[ThreatFox](https://threatfox.abuse.ch) among them, or an analyst's own
-indicators), most matches turn out to be noise: a CDN address shared by
-thousands of sites, an ad pulled in by a web page, a tunnel client doing
-exactly what it was installed for. This project works through each match the
+Indicators come from our own [MISP](https://www.misp-project.org) instance,
+run in Docker with [misp-docker](https://github.com/MISP/misp-docker). It
+aggregates public threat feeds, among them the Threatview.io IP blocklist,
+domain blocklist and C2 Hunt feed, PhishTank, URL Seen in honeypots and
+[ThreatFox](https://threatfox.abuse.ch), plus analysts' own indicators.
+When a campus host contacts a listed address or domain, most matches turn
+out to be noise: a CDN address shared by thousands of sites, an ad pulled in
+by a web page, a tunnel client doing exactly what it was installed for. This project works through each match the
 way an analyst would. It pulls the host's flow records from SuperNetFlow
 (ClickHouse), works out what the host was actually doing, and writes a report
 with a verdict, charts and the evidence behind it.
@@ -76,7 +78,7 @@ flowchart LR
     c1 -- no --> review["Report marked for<br/>analyst review"]
     c2 -- no --> review
 
-    done -. "taken forward" .-> deep["Analyst deep-dive<br/>(Claude Code)"]
+    done -. "taken forward" .-> deep["Deep-dive investigation<br/>(agent)"]
     review -. "taken forward" .-> deep
     deep --> final["Final incident report<br/>(LaTeX/PDF)"]
 
@@ -114,11 +116,12 @@ for the final check.
 | 10 | Investigate: read the evidence, run follow-up queries, pick charts, write the report and a verdict | Agent | `assess.py`, `tools.py`, `charts.py` |
 | 11 | Check the report against the evidence and the baseline; send problems back for revision, then flag anything that still fails | Code | `assess.py` |
 | 12 | Write the HTML, Markdown and PDF reports | Code | `report.py`, `latex.py` |
-| 13 | For cases taken forward: follow-up queries against SuperNetFlow and the team's case database (daily host history, campus percentiles, IOC match records), cross-checks with teammates' findings, a narrative agreed with the team, and a final LaTeX/PDF incident report with figures | Analyst with Claude Code | outside this repo |
+| 13 | For cases taken forward: follow-up queries against SuperNetFlow and the team's case database (daily host history, campus percentiles, IOC match records), cross-checks with teammates' findings, a narrative agreed with the team, and a final LaTeX/PDF incident report with figures | Agent, with analyst review | outside this repo |
 
 The agent does triage at scale: it gives every match a first assessment, so
-the team only looks closely at the cases that matter. Reports that go to the
-supervisor are finished in the analyst stage. The same stage can also run a
+the team only looks closely at the cases that matter. Cases taken forward get a
+second, deeper agent pass, reviewed by an analyst, and the reports that go to
+the supervisor are finished there. The same deep-dive can also run a
 campus-wide hunt for an exploit's traffic shape when a CVE is disclosed (for
 example, request-heavy uploads to web servers), not only follow up IOC matches.
 
@@ -136,7 +139,7 @@ flowchart TB
 
     subgraph feed["Threat feed"]
         direction TB
-        tf["MISP, ThreatFox API<br/>or manual indicators"] --> match["Matched against<br/>campus traffic"]
+        tf["Local MISP in Docker<br/>public threat feeds<br/>+ manual indicators"] --> match["Matched against<br/>campus traffic"]
     end
 
     pub["Public threat context<br/>Malpedia, ThreatFox, web search"]
@@ -175,9 +178,11 @@ flowchart TB
   server, ...) with a random forest trained on weakly supervised labels, and
   measures what's normal for each type. See
   [host_classification/](host_classification/README.md).
-- **Threat feed** (`build_feed.py`) pulls indicators from a local MISP, or
-  takes an analyst's indicators and threat description, and finds the campus
-  hosts that contacted them (`agent/matcher.py`).
+- **Threat feed** (`build_feed.py`): MISP runs locally in Docker and pulls
+  many public feeds. ThreatFox comes in through its API (`sync_threatfox.py`)
+  because MISP's own ThreatFox feeds need a key. The feed build can also take
+  an analyst's indicators and threat description, and finds the campus hosts
+  that contacted them (`agent/matcher.py`).
 - **Investigation agent** (`assess.py`, `agent/`) gathers the evidence, runs
   the model and checks what it writes. The model is set in `.env`: a hosted
   model through OpenRouter (Claude Haiku in current use) or a local Ollama
@@ -210,6 +215,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                                      # database, MISP, model and site settings
 
+# start MISP first: docker compose up -d (in your misp-docker folder)
 python sync_threatfox.py --days 1                         # ThreatFox's latest IOCs into MISP
 python build_feed.py --source misp --days 7               # campus hosts that contacted them
 python assess.py data/misp_matches.jsonl --limit 5 --pdf  # investigate and write the reports
