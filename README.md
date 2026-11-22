@@ -196,7 +196,7 @@ Each case gets a short report written for the security team:
 - **Conclusion and next steps**: verdict, confidence, remaining risk and
   what to do about this host.
 
-The PDF keeps the body to one page, followed by an appendix with the charts
+Each PDF has the report followed by an appendix with the charts
 the model chose, a table of every connection around the contact (each with a
 note on what it most likely was), the case facts and the sources. That table
 is what separates, say, a flagged ad domain loaded in the same minute as a
