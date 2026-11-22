@@ -22,11 +22,12 @@ Three design choices keep the reports trustworthy:
   instead of being trusted to fetch it.
 - **The model reviews blind.** A rule-based verdict is computed from the same
   evidence but never shown to the model; when it was shown, the model just
-  agreed with it. Where they disagree, an analyst decides.
+  agreed with it. Where they disagree, the report is flagged so the analyst
+  looks at that point closely.
 - **Nothing unverified slips through.** Every number in a report is checked
   against the evidence, along with claims like "exfiltration" or "not shared
-  infrastructure". Anything that fails is flagged for review, never quietly
-  rewritten.
+  infrastructure". Anything that fails is flagged for the analyst, never
+  quietly rewritten.
 
 Outside context about the threat comes from code, not from the model browsing:
 Malpedia's description of the malware family, the indicator's ThreatFox
@@ -74,9 +75,11 @@ flowchart LR
 
     rules -. "never shown<br/>to the model" .-> c2
     check -. "problems found:<br/>revision pass" .-> investigate
-    c2 -- yes --> done["Report<br/>verdict stands"]
-    c1 -- no --> review["Report marked for<br/>analyst review"]
-    c2 -- no --> review
+    c2 -- yes --> done["Report<br/>checks passed"]
+    c1 -- no --> flagged["Report flagged<br/>unverified number or<br/>disagrees with rule-based verdict"]
+    c2 -- no --> flagged
+    done --> analyst["Analyst review"]
+    flagged --> analyst
 
     classDef code fill:#e8f0fe,stroke:#3b6fd4,color:#111
     classDef model fill:#fff4d6,stroke:#c98a00,color:#111
@@ -85,9 +88,9 @@ flowchart LR
     classDef warn fill:#fdecea,stroke:#c0392b,color:#111
     class g1,g2,g3,g4,g5,c1,c2,rules code
     class m1,m2,m3 model
-    class feed,cases io
+    class feed,cases,analyst io
     class done good
-    class review warn
+    class flagged warn
     style gather fill:none,stroke:#3b6fd4
     style investigate fill:none,stroke:#c98a00
     style check fill:none,stroke:#3b6fd4
